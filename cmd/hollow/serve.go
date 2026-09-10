@@ -50,6 +50,17 @@ func cmdServe(ctx context.Context, args []string) error {
 		return err
 	}
 	port := ln.Addr().(*net.TCPAddr).Port
+	// Guests reach this machine at its loopback, through the hypervisor's
+	// user networking, and that is where they fetch the agent from. A host
+	// bound to a mesh address instead of loopback still has to answer there.
+	var loopback net.Listener
+	if ip := ln.Addr().(*net.TCPAddr).IP; !ip.IsLoopback() && !ip.IsUnspecified() {
+		loopback, err = net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+		if err != nil {
+			ln.Close()
+			return fmt.Errorf("guests need 127.0.0.1:%d as well: %w", port, err)
+		}
+	}
 	desks, err := host.NewDesks(filepath.Join(dir, "desks"), port, b, images)
 	if err != nil {
 		return err
@@ -64,6 +75,9 @@ func cmdServe(ctx context.Context, args []string) error {
 	if !*quiet {
 		fmt.Printf("\nhollow %s — listening on %s\n\n", version, ln.Addr())
 		fmt.Printf("  state    %s\n", dir)
+		if loopback != nil {
+			fmt.Printf("  guests   %s\n", loopback.Addr())
+		}
 		if backendErr != nil {
 			fmt.Printf("  backend  %s — unavailable: %v\n", b.Name(), backendErr)
 			fmt.Printf("           the API is up, but no desk can start here\n")
@@ -80,8 +94,11 @@ func cmdServe(ctx context.Context, args []string) error {
 		fmt.Println()
 	}
 
-	errc := make(chan error, 1)
+	errc := make(chan error, 2)
 	go func() { errc <- httpSrv.Serve(ln) }()
+	if loopback != nil {
+		go func() { errc <- httpSrv.Serve(loopback) }()
+	}
 	select {
 	case err := <-errc:
 		if !errors.Is(err, http.ErrServerClosed) {

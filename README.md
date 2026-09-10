@@ -81,7 +81,7 @@ journalctl -u hollow -f
 
 | Flag | What it does |
 |---|---|
-| `--addr 127.0.0.1:7070` | Address to listen on. Loopback by default; see below before changing it. |
+| `--addr 127.0.0.1:7070` | Address to listen on. Loopback by default; see below before changing it. Bound elsewhere, it keeps answering on loopback too, which is where desks fetch the agent from. |
 | `--state DIR` | Where images, desks and the token live. `HOLLOW_HOME` does the same. |
 | `--advertise URL` | The address to put in the printed connect code, when clients reach this host by another name. |
 | `--quiet` | Print nothing but errors. |
