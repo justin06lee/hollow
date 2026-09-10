@@ -1,0 +1,6 @@
+The guest agent binaries are placed here by the Makefile — one per guest
+platform, named hollow-agent-<os>-<arch> — and embedded into the hollow
+binary, which hands the right one to every desk as it boots.
+
+They are build output and are not committed. This file is here so the
+directory always exists for the embed directive.
