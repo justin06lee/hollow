@@ -1,0 +1,28 @@
+[Unit]
+Description=hollow — computers for bots
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=@BINDIR@/hollow serve --quiet
+Restart=on-failure
+RestartSec=2
+User=hollow
+Group=hollow
+SupplementaryGroups=kvm
+StateDirectory=hollow
+Environment=HOLLOW_HOME=/var/lib/hollow
+EnvironmentFile=-/etc/hollow.env
+KillMode=mixed
+TimeoutStopSec=30
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/hollow
+PrivateTmp=true
+DevicePolicy=closed
+DeviceAllow=/dev/kvm rw
+
+[Install]
+WantedBy=multi-user.target
