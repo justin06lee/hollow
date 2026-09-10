@@ -1,0 +1,14 @@
+# build output
+/build/
+/dist/release/
+/internal/host/agents/hollow-agent-*
+
+# local state
+*.log
+*.qcow2
+*.iso
+
+# os / editor junk
+.DS_Store
+.idea/
+.vscode/
