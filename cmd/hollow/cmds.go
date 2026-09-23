@@ -232,11 +232,18 @@ func cmdRm(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	// One missing desk does not keep the rest running.
+	failed := 0
 	for _, id := range fs.Args() {
 		if err := c.Delete(ctx, id); err != nil {
-			return err
+			fmt.Fprintf(os.Stderr, "hollow: %v\n", err)
+			failed++
+			continue
 		}
 		fmt.Fprintf(os.Stderr, "desk %s stopped\n", id)
+	}
+	if failed > 0 {
+		return exitError(1)
 	}
 	return nil
 }
