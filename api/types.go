@@ -105,6 +105,18 @@ type Desk struct {
 	Created  time.Time `json:"created"`
 	LastUsed time.Time `json:"last_used"`
 	Error    string    `json:"error,omitempty"`
+
+	// Paused means a person took the desk over in the live view: agents'
+	// actions on it are refused until they hand it back. Watchers is how
+	// many live views are open on it.
+	Paused   bool `json:"paused,omitempty"`
+	Watchers int  `json:"watchers,omitempty"`
+}
+
+// Pause is the body of a pause request: true to take the desk from agents,
+// false to give it back.
+type Pause struct {
+	Paused bool `json:"paused"`
 }
 
 // Input actions.
@@ -332,6 +344,60 @@ type SecretSet struct {
 type Guard struct {
 	Secret string   `json:"secret"`
 	Sites  []string `json:"sites"`
+}
+
+// The live view.
+//
+// GET /v1/desks/{id}/stream is a WebSocket. The desk sends a StreamHello as
+// text, then the screen as binary messages, each one JPEG, whenever it
+// changes. The other side sends StreamInput as text: the pointer and
+// keyboard of a person watching. A person reaches it through the host's
+// viewer at /view/, which a ViewLink opens.
+
+// StreamHello opens a stream, and is sent again if the screen changes size.
+// Input coordinates are screen pixels, whatever the frame size.
+type StreamHello struct {
+	Type    string `json:"type"` // "hello"
+	ScreenW int    `json:"screen_w"`
+	ScreenH int    `json:"screen_h"`
+	FrameW  int    `json:"frame_w"`
+	FrameH  int    `json:"frame_h"`
+}
+
+// StreamInput is one thing a watcher did.
+//
+//	move   X, Y              the pointer
+//	down   B, X, Y           press button B (1 left, 2 middle, 3 right)
+//	up     B, X, Y           release it
+//	wheel  DX, DY, X, Y      scroll by notches; DY > 0 is down
+//	key    Keys              an xdotool chord: ctrl+c, Return, shift+Tab
+//	type   Text              characters, as typed
+//	paste  Text              text from the watcher's clipboard
+//
+// The desk's clipboard is read over HTTP, as ever, so that it comes back
+// through the host's scrubbing.
+type StreamInput struct {
+	T    string `json:"t"`
+	X    int    `json:"x,omitempty"`
+	Y    int    `json:"y,omitempty"`
+	B    int    `json:"b,omitempty"`
+	DX   int    `json:"dx,omitempty"`
+	DY   int    `json:"dy,omitempty"`
+	Keys string `json:"keys,omitempty"`
+	Text string `json:"text,omitempty"`
+}
+
+// ViewRequest asks for a link to the live view, of one desk or of all.
+type ViewRequest struct {
+	Desk string `json:"desk,omitempty"`
+}
+
+// ViewLink opens the live view in a browser. Path goes after any of the
+// host's addresses. It works once, within its time, and turns into a
+// session for that browser; ask for another to open it again.
+type ViewLink struct {
+	Path    string    `json:"path"`
+	Expires time.Time `json:"expires"`
 }
 
 // Error is the body of every non-2xx response.

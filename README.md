@@ -158,6 +158,41 @@ hollow rm research
 Desks are named or numbered. Flags go anywhere on the line. Programs run as
 the desk's user, `bot`, with the display set and passwordless `sudo`.
 
+## Watch a desk, and take it over
+
+Every host serves a live view: all its desks with pictures of their screens,
+and any one of them as a live screen you can drive with your own mouse and
+keyboard.
+
+```sh
+hollow view                 # every desk, in this machine's browser
+hollow view research        # one desk
+hollow view research --print   # just the link, to open on another machine
+```
+
+Open it from any machine that reaches the host: the Mac next to you, or a
+phone on the same makima or Tailscale network. The first time you click,
+scroll or type on a desk's screen, you **take it over**. The agent's actions
+on that desk are then refused, with a message telling it to wait, until you
+press **Hand back**. Screenshots and reads still work for the agent while it
+waits. If you close the page without handing back, the agent gets the desk
+back a minute later. `hollow pause ID` and `hollow resume ID` do the same
+from the command line.
+
+Keys go to the desk as keys. ⌘ counts as Ctrl, and pasting types your own
+clipboard into the desk. The Clipboard button shows the desk's clipboard,
+passed through the vault's scrubbing like everything else, so you can copy
+it to your machine. The picture streams as JPEG frames, sent only when the
+screen changes, so a desk that is not moving costs next to nothing. Quality
+trades sharpness for bandwidth. Balanced is a few hundred KB/s while a page
+scrolls.
+
+A link opens once, within fifteen minutes, and turns into a twelve-hour
+session cookie for that browser and host. The pages have a strict CSP and
+refuse to be framed. Anything that changes a desk needs a header no other
+site can send. The stream accepts connections only from the host's own
+pages.
+
 ## Secrets
 
 A host keeps a vault, so an agent can log in without being handed a
@@ -225,6 +260,10 @@ download.
 | `PUT` · `GET /v1/desks/{id}/files?path=` | Write and read files. |
 | `POST /v1/desks/{id}/record/start` · `stop` | Record the screen. Stop returns the MP4. |
 | `GET /v1/desks/{id}/health` · `logs` | The agent's view, and the serial console. |
+| `GET /v1/desks/{id}/stream` | The screen as a WebSocket: a `StreamHello`, then a JPEG frame whenever it changes. Send `StreamInput` back to drive it. |
+| `POST /v1/desks/{id}/pause` | A `Pause`: take the desk from agents, or give it back. Agents' actions on a paused desk get a 423. |
+| `POST /v1/view` | A `ViewLink` to the live view of every desk, or of one (`{"desk": ID}`). |
+| `/view/` | The live view itself, for a browser. It is opened with a link and needs no token. |
 | `GET /v1/secrets` · `PUT` · `DELETE /v1/secrets/{name}` | The vault: list names, accounts, fields and sites, or store (`SecretSet`) or remove one. No route returns a value. |
 
 The types are in [`api/types.go`](api/types.go) and a Go client is in
@@ -287,8 +326,8 @@ cmd/hollow-agent      the program inside a desk
 api                   the wire types, shared by host, agent and clients
 client                a Go client for the API, with multi-address failover
 secrets               the secret command (set, ls, rm, import), shared with bangboo
-internal/host         the daemon: token, listeners, desks, the vault, the API server, the embedded agent
+internal/host         the daemon: token, listeners, desks, the vault, the API server, the live view, the embedded agent
 internal/image        golden images: download, verify, provision, flatten, clean up
 internal/backend      the hypervisor interface, and qemu/ behind it
-internal/agent        what the agent does: capture, input, windows, browser, exec, files, record
+internal/agent        what the agent does: capture, input, windows, browser, exec, files, record, stream
 ```

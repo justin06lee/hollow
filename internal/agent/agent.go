@@ -76,6 +76,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /browser/click", s.handleBrowserClick)
 	mux.HandleFunc("POST /browser/type", s.handleBrowserType)
 	mux.HandleFunc("POST /browser/eval", s.handleBrowserEval)
+	mux.HandleFunc("GET /stream", s.handleStream)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		got := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 		if s.key == "" || subtle.ConstantTimeCompare([]byte(got), []byte(s.key)) != 1 {
@@ -94,7 +95,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("display %s: %w", s.disp.name, err))
 		return
 	}
-	features := []string{"browser", "windows"}
+	features := []string{"browser", "windows", "stream"}
 	if _, err := lookPath("xclip"); err == nil {
 		features = append(features, "clipboard")
 	}

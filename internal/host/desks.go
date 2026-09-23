@@ -146,6 +146,85 @@ func (d *Desks) Agent(ref string) (string, string, error) {
 	return fmt.Sprintf("http://127.0.0.1:%d", k.agentPort), k.key, nil
 }
 
+// Paused reports whether a person has taken the desk from agents.
+func (d *Desks) Paused(ref string) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	k, ok := d.find(ref)
+	return ok && k.Paused
+}
+
+// SetPaused takes a desk from agents, or gives it back.
+func (d *Desks) SetPaused(ref string, paused bool) (api.Desk, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	k, ok := d.find(ref)
+	if !ok {
+		return api.Desk{}, fmt.Errorf("no desk %q", ref)
+	}
+	k.Paused = paused
+	k.LastUsed = time.Now()
+	return k.Desk, nil
+}
+
+// resumeAfter is how long a paused desk stays paused once nobody is
+// watching it. A person who took a desk over and closed the page has
+// forgotten about it, and the agent waiting on it should not wait forever;
+// a browser reconnecting after a blip is back well within it.
+const resumeAfter = time.Minute
+
+// Watch counts a live view open on a desk. While one is, the desk is in
+// use, however long it has been since an agent touched it. Call the
+// function it returns when the view closes.
+func (d *Desks) Watch(ref string) func() {
+	d.mu.Lock()
+	k, ok := d.find(ref)
+	if ok {
+		k.Watchers++
+		k.LastUsed = time.Now()
+	}
+	d.mu.Unlock()
+	if !ok {
+		return func() {}
+	}
+	stop := make(chan struct{})
+	go func() {
+		t := time.NewTicker(30 * time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-t.C:
+				d.mu.Lock()
+				k.LastUsed = time.Now()
+				d.mu.Unlock()
+			}
+		}
+	}()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			close(stop)
+			d.mu.Lock()
+			k.Watchers--
+			k.LastUsed = time.Now()
+			idle := k.Watchers == 0 && k.Paused
+			d.mu.Unlock()
+			if idle {
+				time.AfterFunc(resumeAfter, func() {
+					d.mu.Lock()
+					defer d.mu.Unlock()
+					if k.Watchers == 0 && k.Paused {
+						k.Paused = false
+						log.Printf("hollow: desk %s: nobody is watching it, so agents have it back", k.ID)
+					}
+				})
+			}
+		})
+	}
+}
+
 // ConsoleLog is what the guest printed to its serial console.
 func (d *Desks) ConsoleLog(ref string) (string, error) {
 	d.mu.Lock()
