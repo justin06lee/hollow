@@ -3,12 +3,15 @@ package host
 import (
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -21,17 +24,25 @@ import (
 )
 
 const (
-	defaultMemMB  = 768
+	defaultMemMB  = 1024
 	defaultCPUs   = 2
 	defaultWidth  = 1280
 	defaultHeight = 800
 	minMemMB      = 256
 	bootTimeout   = 3 * time.Minute
 
+	// memHeadroomMB is kept free for the host itself when admitting desks.
+	memHeadroomMB = 512
+
 	// guestHost is where a guest reaches this machine through QEMU's user
 	// networking: the address of the host, seen from inside.
 	guestHost = "10.0.2.2"
 )
+
+var nameRE = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,62}$`)
+
+// ErrExists is returned by Create when a desk of that name is running.
+var ErrExists = errors.New("a desk with that name exists")
 
 // Desks starts, tracks, and stops desks.
 type Desks struct {
@@ -47,7 +58,9 @@ type Desks struct {
 type desk struct {
 	api.Desk
 	dir       string
+	golden    string
 	agentPort int
+	key       string
 	vm        backend.VM
 }
 
@@ -60,10 +73,24 @@ func NewDesks(dir string, hostPort int, b backend.Backend, images *image.Manager
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
 	}
-	return &Desks{dir: dir, port: hostPort, backend: b, images: images, desks: map[string]*desk{}}, nil
+	d := &Desks{dir: dir, port: hostPort, backend: b, images: images, desks: map[string]*desk{}}
+	images.SetInUse(d.goldens)
+	images.GC()
+	return d, nil
 }
 
-// List is every desk, newest last.
+// goldens is the golden disks running desks are built on.
+func (d *Desks) goldens() map[string]bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	out := map[string]bool{}
+	for _, k := range d.desks {
+		out[k.golden] = true
+	}
+	return out
+}
+
+// List is every desk, oldest first.
 func (d *Desks) List() []api.Desk {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -75,42 +102,57 @@ func (d *Desks) List() []api.Desk {
 	return out
 }
 
-// Get is one desk.
-func (d *Desks) Get(id string) (api.Desk, error) {
+// find looks a desk up by id, then by name.
+func (d *Desks) find(ref string) (*desk, bool) {
+	if k, ok := d.desks[ref]; ok {
+		return k, true
+	}
+	for _, k := range d.desks {
+		if k.Name == ref {
+			return k, true
+		}
+	}
+	return nil, false
+}
+
+// Get is one desk, by id or name.
+func (d *Desks) Get(ref string) (api.Desk, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	k, ok := d.desks[id]
+	k, ok := d.find(ref)
 	if !ok {
-		return api.Desk{}, fmt.Errorf("no desk %q", id)
+		return api.Desk{}, fmt.Errorf("no desk %q", ref)
 	}
 	return k.Desk, nil
 }
 
-// AgentURL is where a ready desk's agent answers, on this machine's loopback.
-func (d *Desks) AgentURL(id string) (string, error) {
+// Agent is where a ready desk's agent answers, on this machine's loopback,
+// and the key it wants. Using a desk this way counts as using it.
+func (d *Desks) Agent(ref string) (string, string, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	k, ok := d.desks[id]
+	k, ok := d.find(ref)
 	if !ok {
-		return "", fmt.Errorf("no desk %q", id)
+		return "", "", fmt.Errorf("no desk %q", ref)
 	}
 	if k.State != api.DeskReady {
 		msg := k.State
 		if k.Error != "" {
 			msg += ": " + k.Error
 		}
-		return "", fmt.Errorf("desk %s is %s", id, msg)
+		return "", "", fmt.Errorf("desk %s is %s", k.ID, msg)
 	}
-	return fmt.Sprintf("http://127.0.0.1:%d", k.agentPort), nil
+	k.LastUsed = time.Now()
+	return fmt.Sprintf("http://127.0.0.1:%d", k.agentPort), k.key, nil
 }
 
 // ConsoleLog is what the guest printed to its serial console.
-func (d *Desks) ConsoleLog(id string) (string, error) {
+func (d *Desks) ConsoleLog(ref string) (string, error) {
 	d.mu.Lock()
-	k, ok := d.desks[id]
+	k, ok := d.find(ref)
 	d.mu.Unlock()
 	if !ok {
-		return "", fmt.Errorf("no desk %q", id)
+		return "", fmt.Errorf("no desk %q", ref)
 	}
 	data, err := os.ReadFile(filepath.Join(k.dir, "console.log"))
 	if err != nil {
@@ -144,6 +186,10 @@ func (d *Desks) Create(spec api.DeskSpec) (api.Desk, error) {
 	if spec.Width < 320 || spec.Height < 240 || spec.Width > 7680 || spec.Height > 4320 {
 		return api.Desk{}, fmt.Errorf("%dx%d is not a screen size", spec.Width, spec.Height)
 	}
+	if _, avail := meminfo(); avail > 0 && avail < spec.MemMB+memHeadroomMB {
+		return api.Desk{}, fmt.Errorf("not enough memory on this host: %d MB available, a %d MB desk needs %d with headroom — close a desk, ask for less (mem_mb), or use another host",
+			avail, spec.MemMB, spec.MemMB+memHeadroomMB)
+	}
 
 	id, err := newID()
 	if err != nil {
@@ -152,6 +198,20 @@ func (d *Desks) Create(spec api.DeskSpec) (api.Desk, error) {
 	name := strings.TrimSpace(spec.Name)
 	if name == "" {
 		name = id
+	}
+	if !nameRE.MatchString(name) {
+		return api.Desk{}, fmt.Errorf("desk name %q: letters, digits, dot, dash and underscore, up to 63", name)
+	}
+	d.mu.Lock()
+	if k, ok := d.find(name); ok && k.State != api.DeskStopped && k.State != api.DeskFailed {
+		d.mu.Unlock()
+		return k.Desk, fmt.Errorf("%w: %s is desk %s", ErrExists, name, k.ID)
+	}
+	d.mu.Unlock()
+
+	key, err := newKey()
+	if err != nil {
+		return api.Desk{}, err
 	}
 	dir := filepath.Join(d.dir, id)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -170,8 +230,8 @@ func (d *Desks) Create(spec api.DeskSpec) (api.Desk, error) {
 	if err != nil {
 		return fail(err)
 	}
-	env := fmt.Sprintf("HOLLOW_HOST=%s\nHOLLOW_PORT=%d\nHOLLOW_WIDTH=%d\nHOLLOW_HEIGHT=%d\nHOLLOW_DESK=%s\nHOLLOW_NAME=%s\n",
-		guestHost, d.port, spec.Width, spec.Height, id, name)
+	env := fmt.Sprintf("HOLLOW_HOST=%s\nHOLLOW_PORT=%d\nHOLLOW_WIDTH=%d\nHOLLOW_HEIGHT=%d\nHOLLOW_DESK=%s\nHOLLOW_NAME=%s\nHOLLOW_AGENT_KEY=%s\n",
+		guestHost, d.port, spec.Width, spec.Height, id, name, key)
 	iso := filepath.Join(dir, "hollow.iso")
 	if err := image.WriteISO(iso, "hollow", map[string][]byte{"hollow.env": []byte(env)}); err != nil {
 		return fail(err)
@@ -189,14 +249,15 @@ func (d *Desks) Create(spec api.DeskSpec) (api.Desk, error) {
 	if err != nil {
 		return fail(err)
 	}
-
+	// The ISO held the key; the VM has it open, and nothing else needs it.
+	now := time.Now()
 	k := &desk{
 		Desk: api.Desk{
 			ID: id, Name: name, OS: spec.OS, State: api.DeskBooting,
 			MemMB: spec.MemMB, CPUs: spec.CPUs, Width: spec.Width, Height: spec.Height,
-			Created: time.Now(),
+			Created: now, LastUsed: now,
 		},
-		dir: dir, agentPort: port, vm: vm,
+		dir: dir, golden: golden, agentPort: port, key: key, vm: vm,
 	}
 	d.mu.Lock()
 	d.desks[id] = k
@@ -217,7 +278,9 @@ func (d *Desks) watch(k *desk) {
 			return
 		case <-time.After(500 * time.Millisecond):
 		}
-		resp, err := client.Get(health)
+		req, _ := http.NewRequest(http.MethodGet, health, nil)
+		req.Header.Set("Authorization", "Bearer "+k.key)
+		resp, err := client.Do(req)
 		if err == nil {
 			resp.Body.Close()
 			if resp.StatusCode == http.StatusOK {
@@ -241,23 +304,54 @@ func (d *Desks) setState(k *desk, state, errMsg string) {
 		return
 	}
 	k.State, k.Error = state, errMsg
+	k.LastUsed = time.Now()
 }
 
 // Delete stops a desk and removes everything it had.
-func (d *Desks) Delete(ctx context.Context, id string) error {
+func (d *Desks) Delete(ctx context.Context, ref string) error {
 	d.mu.Lock()
-	k, ok := d.desks[id]
+	k, ok := d.find(ref)
 	if ok {
-		delete(d.desks, id)
+		delete(d.desks, k.ID)
 	}
 	d.mu.Unlock()
 	if !ok {
-		return fmt.Errorf("no desk %q", id)
+		return fmt.Errorf("no desk %q", ref)
 	}
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	_ = k.vm.Shutdown(ctx)
-	return os.RemoveAll(k.dir)
+	err := os.RemoveAll(k.dir)
+	d.images.GC()
+	return err
+}
+
+// Reap stops desks nobody has used for idle, and desks whose VM has
+// stopped. It runs until ctx ends.
+func (d *Desks) Reap(ctx context.Context, idle time.Duration) {
+	t := time.NewTicker(time.Minute)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		d.mu.Lock()
+		var stale []string
+		for id, k := range d.desks {
+			if k.State == api.DeskStopped && time.Since(k.LastUsed) > 10*time.Minute {
+				stale = append(stale, id)
+			} else if idle > 0 && time.Since(k.LastUsed) > idle {
+				stale = append(stale, id)
+			}
+		}
+		d.mu.Unlock()
+		for _, id := range stale {
+			log.Printf("hollow: stopping desk %s, unused for longer than %s", id, idle)
+			_ = d.Delete(ctx, id)
+		}
+	}
 }
 
 // Close stops every desk. Called when the daemon exits.
@@ -289,6 +383,14 @@ func newID() (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(b), nil
+}
+
+func newKey() (string, error) {
+	b := make([]byte, 24)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 
 func errString(err error) string {

@@ -2,11 +2,11 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
-	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -34,6 +34,9 @@ func newFlags(name, synopsis string) *flag.FlagSet {
 // dial finds the host. See the usage text for the order.
 func dial() (*client.Client, error) {
 	if code := envOr("HOLLOW_CONNECT", connectFlag); code != "" {
+		if connectFlag != "" {
+			code = connectFlag
+		}
 		return client.FromConnect(code)
 	}
 	if u := os.Getenv("HOLLOW_URL"); u != "" {
@@ -41,18 +44,37 @@ func dial() (*client.Client, error) {
 		if tok == "" {
 			return nil, errors.New("HOLLOW_URL is set but HOLLOW_TOKEN is not")
 		}
-		return client.New(u, tok), nil
+		return client.NewMulti(splitList(u), tok), nil
 	}
 	dir := host.DefaultDir()
 	tok, err := host.ReadToken(dir)
 	if err != nil {
 		return nil, fmt.Errorf("no host to talk to: set HOLLOW_CONNECT, or run `hollow serve` here (no token in %s)", dir)
 	}
-	_, p, err := net.SplitHostPort(envOr("HOLLOW_ADDR", defaultAddr))
-	if err != nil {
-		p = "7070"
+	return client.New(fmt.Sprintf("http://127.0.0.1:%d", defaultPort()), tok), nil
+}
+
+// parse reads flags wherever they are among the arguments — `hollow read ID
+// --json` as well as `hollow read --json ID` — which is what people and
+// agents both type. Everything after a "--" is taken as it is.
+func parse(fs *flag.FlagSet, args []string) error {
+	var pos []string
+	for {
+		if err := fs.Parse(args); err != nil {
+			return err
+		}
+		rest := fs.Args()
+		if len(rest) == 0 {
+			break
+		}
+		if n := len(args) - len(rest); n > 0 && args[n-1] == "--" {
+			pos = append(pos, rest...)
+			break
+		}
+		pos = append(pos, rest[0])
+		args = rest[1:]
 	}
-	return client.New("http://127.0.0.1:"+p, tok), nil
+	return fs.Parse(append([]string{"--"}, pos...))
 }
 
 func need(fs *flag.FlagSet, n int, what string) error {
@@ -72,7 +94,7 @@ func atoi(s, what string) (int, error) {
 
 func cmdStatus(ctx context.Context, args []string) error {
 	fs := newFlags("status", "status")
-	if err := fs.Parse(args); err != nil {
+	if err := parse(fs, args); err != nil {
 		return err
 	}
 	c, err := dial()
@@ -92,7 +114,7 @@ func cmdStatus(ctx context.Context, args []string) error {
 
 func cmdPull(ctx context.Context, args []string) error {
 	fs := newFlags("pull", "pull [linux]")
-	if err := fs.Parse(args); err != nil {
+	if err := parse(fs, args); err != nil {
 		return err
 	}
 	osName := "linux"
@@ -122,7 +144,7 @@ func cmdNew(ctx context.Context, args []string) error {
 	cpus := fs.Int("cpus", 0, "virtual cpus (default 2)")
 	size := fs.String("size", "", "screen size, WxH (default 1280x800)")
 	noWait := fs.Bool("no-wait", false, "return as soon as the VM starts, before the desk can be driven")
-	if err := fs.Parse(args); err != nil {
+	if err := parse(fs, args); err != nil {
 		return err
 	}
 	spec := api.DeskSpec{OS: *osName, Name: *name, MemMB: *mem, CPUs: *cpus}
@@ -161,7 +183,7 @@ func cmdNew(ctx context.Context, args []string) error {
 
 func cmdLs(ctx context.Context, args []string) error {
 	fs := newFlags("ls", "ls")
-	if err := fs.Parse(args); err != nil {
+	if err := parse(fs, args); err != nil {
 		return err
 	}
 	c, err := dial()
@@ -177,20 +199,21 @@ func cmdLs(ctx context.Context, args []string) error {
 		return nil
 	}
 	tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "ID\tNAME\tOS\tSTATE\tMEM\tSCREEN\tAGE")
+	fmt.Fprintln(tw, "ID\tNAME\tOS\tSTATE\tMEM\tSCREEN\tAGE\tIDLE")
 	for _, d := range desks {
 		state := d.State
 		if d.Error != "" {
 			state += " (" + d.Error + ")"
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%dM\t%dx%d\t%s\n", d.ID, d.Name, d.OS, state, d.MemMB, d.Width, d.Height, time.Since(d.Created).Round(time.Second))
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%dM\t%dx%d\t%s\t%s\n", d.ID, d.Name, d.OS, state, d.MemMB, d.Width, d.Height,
+			time.Since(d.Created).Round(time.Second), time.Since(d.LastUsed).Round(time.Second))
 	}
 	return tw.Flush()
 }
 
 func cmdRm(ctx context.Context, args []string) error {
 	fs := newFlags("rm", "rm ID...")
-	if err := fs.Parse(args); err != nil {
+	if err := parse(fs, args); err != nil {
 		return err
 	}
 	if err := need(fs, 1, "ID..."); err != nil {
@@ -213,7 +236,7 @@ func cmdShot(ctx context.Context, args []string) error {
 	fs := newFlags("shot", "shot ID [FILE]")
 	jpeg := fs.Bool("jpeg", false, "JPEG instead of PNG")
 	quality := fs.Int("quality", 80, "JPEG quality")
-	if err := fs.Parse(args); err != nil {
+	if err := parse(fs, args); err != nil {
 		return err
 	}
 	if err := need(fs, 1, "ID [FILE]"); err != nil {
@@ -257,7 +280,7 @@ func cmdClick(ctx context.Context, args []string) error {
 	right := fs.Bool("right", false, "right button")
 	middle := fs.Bool("middle", false, "middle button")
 	double := fs.Bool("double", false, "double-click")
-	if err := fs.Parse(args); err != nil {
+	if err := parse(fs, args); err != nil {
 		return err
 	}
 	if err := need(fs, 1, "ID [X Y]"); err != nil {
@@ -289,7 +312,7 @@ func cmdClick(ctx context.Context, args []string) error {
 
 func cmdMove(ctx context.Context, args []string) error {
 	fs := newFlags("move", "move ID X Y")
-	if err := fs.Parse(args); err != nil {
+	if err := parse(fs, args); err != nil {
 		return err
 	}
 	if err := need(fs, 3, "ID X Y"); err != nil {
@@ -311,7 +334,7 @@ func cmdScroll(ctx context.Context, args []string) error {
 	x := fs.Int("x", -1, "pointer x before scrolling")
 	y := fs.Int("y", -1, "pointer y before scrolling")
 	dx := fs.Int("dx", 0, "horizontal notches (positive: right)")
-	if err := fs.Parse(args); err != nil {
+	if err := parse(fs, args); err != nil {
 		return err
 	}
 	if err := need(fs, 2, "ID N"); err != nil {
@@ -330,7 +353,7 @@ func cmdScroll(ctx context.Context, args []string) error {
 
 func cmdDrag(ctx context.Context, args []string) error {
 	fs := newFlags("drag", "drag ID X Y X2 Y2")
-	if err := fs.Parse(args); err != nil {
+	if err := parse(fs, args); err != nil {
 		return err
 	}
 	if err := need(fs, 5, "ID X Y X2 Y2"); err != nil {
@@ -349,7 +372,7 @@ func cmdDrag(ctx context.Context, args []string) error {
 
 func cmdType(ctx context.Context, args []string) error {
 	fs := newFlags("type", "type ID TEXT...")
-	if err := fs.Parse(args); err != nil {
+	if err := parse(fs, args); err != nil {
 		return err
 	}
 	if err := need(fs, 2, "ID TEXT..."); err != nil {
@@ -360,7 +383,7 @@ func cmdType(ctx context.Context, args []string) error {
 
 func cmdKey(ctx context.Context, args []string) error {
 	fs := newFlags("key", "key ID KEYS...")
-	if err := fs.Parse(args); err != nil {
+	if err := parse(fs, args); err != nil {
 		return err
 	}
 	if err := need(fs, 2, "ID KEYS..."); err != nil {
@@ -383,9 +406,7 @@ func cmdExec(ctx context.Context, args []string) error {
 	detach := fs.Bool("detach", false, "start it and return at once, printing its pid")
 	timeout := fs.Duration("timeout", 60*time.Second, "give up after this long")
 	dir := fs.String("dir", "", "working directory on the desk")
-	// Flags may come before or after the ID; the command is everything after
-	// the first non-flag that is not the ID.
-	if err := fs.Parse(args); err != nil {
+	if err := parse(fs, args); err != nil {
 		return err
 	}
 	if fs.NArg() < 1 {
@@ -393,13 +414,6 @@ func cmdExec(ctx context.Context, args []string) error {
 	}
 	id := fs.Arg(0)
 	rest := fs.Args()[1:]
-	if len(rest) > 0 && strings.HasPrefix(rest[0], "-") {
-		// `hollow exec ID --shell -- cmd`: parse the flags that came after the ID.
-		if err := fs.Parse(rest); err != nil {
-			return err
-		}
-		rest = fs.Args()
-	}
 	if len(rest) == 0 {
 		return errors.New("nothing to run: hollow exec ID -- CMD [ARGS...]")
 	}
@@ -433,7 +447,7 @@ func cmdExec(ctx context.Context, args []string) error {
 
 func cmdPut(ctx context.Context, args []string) error {
 	fs := newFlags("put", "put ID LOCAL REMOTE")
-	if err := fs.Parse(args); err != nil {
+	if err := parse(fs, args); err != nil {
 		return err
 	}
 	if err := need(fs, 3, "ID LOCAL REMOTE"); err != nil {
@@ -453,7 +467,7 @@ func cmdPut(ctx context.Context, args []string) error {
 
 func cmdGet(ctx context.Context, args []string) error {
 	fs := newFlags("get", "get ID REMOTE LOCAL")
-	if err := fs.Parse(args); err != nil {
+	if err := parse(fs, args); err != nil {
 		return err
 	}
 	if err := need(fs, 3, "ID REMOTE LOCAL"); err != nil {
@@ -484,7 +498,7 @@ func cmdGet(ctx context.Context, args []string) error {
 func cmdRec(ctx context.Context, args []string) error {
 	fs := newFlags("rec", "rec ID start|stop [FILE]")
 	fps := fs.Int("fps", 10, "frames per second, for start")
-	if err := fs.Parse(args); err != nil {
+	if err := parse(fs, args); err != nil {
 		return err
 	}
 	if err := need(fs, 2, "ID start|stop [FILE]"); err != nil {
@@ -522,7 +536,7 @@ func cmdRec(ctx context.Context, args []string) error {
 
 func cmdHealth(ctx context.Context, args []string) error {
 	fs := newFlags("health", "health ID")
-	if err := fs.Parse(args); err != nil {
+	if err := parse(fs, args); err != nil {
 		return err
 	}
 	if err := need(fs, 1, "ID"); err != nil {
@@ -542,7 +556,7 @@ func cmdHealth(ctx context.Context, args []string) error {
 
 func cmdLogs(ctx context.Context, args []string) error {
 	fs := newFlags("logs", "logs ID")
-	if err := fs.Parse(args); err != nil {
+	if err := parse(fs, args); err != nil {
 		return err
 	}
 	if err := need(fs, 1, "ID"); err != nil {
@@ -557,5 +571,119 @@ func cmdLogs(ctx context.Context, args []string) error {
 		return err
 	}
 	fmt.Print(out)
+	return nil
+}
+
+func cmdOpen(ctx context.Context, args []string) error {
+	fs := newFlags("open", "open ID URL")
+	newTab := fs.Bool("tab", false, "in a new tab")
+	if err := parse(fs, args); err != nil {
+		return err
+	}
+	if err := need(fs, 2, "ID URL"); err != nil {
+		return err
+	}
+	c, err := dial()
+	if err != nil {
+		return err
+	}
+	res, err := c.BrowserOpen(ctx, fs.Arg(0), api.BrowserOpen{URL: fs.Arg(1), NewTab: *newTab})
+	if err != nil {
+		return err
+	}
+	fmt.Println(res.URL)
+	return nil
+}
+
+func cmdRead(ctx context.Context, args []string) error {
+	fs := newFlags("read", "read ID")
+	offset := fs.Int("offset", 0, "start this many characters into the page text")
+	max := fs.Int("max", 0, "at most this many characters (default 6000)")
+	asJSON := fs.Bool("json", false, "print the whole state as JSON")
+	if err := parse(fs, args); err != nil {
+		return err
+	}
+	if err := need(fs, 1, "ID"); err != nil {
+		return err
+	}
+	c, err := dial()
+	if err != nil {
+		return err
+	}
+	st, err := c.BrowserRead(ctx, fs.Arg(0), api.BrowserRead{Offset: *offset, MaxChars: *max})
+	if err != nil {
+		return err
+	}
+	if *asJSON {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(st)
+	}
+	fmt.Printf("%s\n%s\n\n%s\n", st.Title, st.URL, st.Text)
+	if end := st.Offset + len([]rune(st.Text)); end < st.TotalChars {
+		fmt.Printf("\n[%d of %d characters; --offset %d for more]\n", end, st.TotalChars, end)
+	}
+	fmt.Println()
+	for _, e := range st.Elements {
+		where := ""
+		if !e.Visible {
+			where = " (off screen)"
+		}
+		fmt.Printf("[%d] %s %q%s\n", e.Index, e.Kind, e.Label, where)
+	}
+	return nil
+}
+
+func cmdWindows(ctx context.Context, args []string) error {
+	fs := newFlags("windows", "windows ID [activate|close WINDOW]")
+	if err := parse(fs, args); err != nil {
+		return err
+	}
+	if err := need(fs, 1, "ID"); err != nil {
+		return err
+	}
+	c, err := dial()
+	if err != nil {
+		return err
+	}
+	if fs.NArg() >= 3 {
+		return c.WindowAction(ctx, fs.Arg(0), api.WindowAction{Action: fs.Arg(1), ID: fs.Arg(2)})
+	}
+	list, err := c.Windows(ctx, fs.Arg(0))
+	if err != nil {
+		return err
+	}
+	tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(tw, "WINDOW\tCLASS\tGEOMETRY\tTITLE")
+	for _, w := range list {
+		mark := ""
+		if w.Active {
+			mark = " *"
+		}
+		fmt.Fprintf(tw, "%s%s\t%s\t%dx%d+%d+%d\t%s\n", w.ID, mark, w.Class, w.Width, w.Height, w.X, w.Y, w.Title)
+	}
+	return tw.Flush()
+}
+
+func cmdClip(ctx context.Context, args []string) error {
+	fs := newFlags("clip", "clip ID [TEXT...]")
+	if err := parse(fs, args); err != nil {
+		return err
+	}
+	if err := need(fs, 1, "ID [TEXT...]"); err != nil {
+		return err
+	}
+	c, err := dial()
+	if err != nil {
+		return err
+	}
+	if fs.NArg() > 1 {
+		return c.SetClipboard(ctx, fs.Arg(0), strings.Join(fs.Args()[1:], " "))
+	}
+	text, err := c.Clipboard(ctx, fs.Arg(0))
+	if err != nil {
+		return err
+	}
+	fmt.Print(text)
 	return nil
 }
