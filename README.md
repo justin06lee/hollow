@@ -46,7 +46,7 @@ make                             # build hollow, with the guest agent inside it,
 make ship HOST=root@tenet.makima # or: build for linux/amd64 and install it there as a service
 ```
 
-Needs Go 1.25 or newer to build. A host needs an x86_64 Linux machine with
+Needs Go 1.26 or newer to build. A host needs an x86_64 Linux machine with
 `/dev/kvm`. QEMU is installed for you if it is missing.
 
 ## Run a host
