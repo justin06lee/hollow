@@ -16,6 +16,7 @@ import (
 	"github.com/justin06lee/hollow/api"
 	"github.com/justin06lee/hollow/client"
 	"github.com/justin06lee/hollow/internal/host"
+	"github.com/justin06lee/hollow/secrets"
 )
 
 // connectFlag is shared by every client command.
@@ -686,4 +687,40 @@ func cmdClip(ctx context.Context, args []string) error {
 	}
 	fmt.Print(text)
 	return nil
+}
+
+func cmdSecret(ctx context.Context, args []string) error {
+	// --connect may come anywhere; take it out before the subcommand sees
+	// the rest.
+	var rest []string
+	for i := 0; i < len(args); i++ {
+		switch a := args[i]; {
+		case a == "--connect" || a == "-connect":
+			if i+1 < len(args) {
+				connectFlag = args[i+1]
+				i++
+			}
+		case strings.HasPrefix(a, "--connect=") || strings.HasPrefix(a, "-connect="):
+			_, connectFlag, _ = strings.Cut(a, "=")
+		default:
+			rest = append(rest, a)
+		}
+	}
+	return secrets.Main(ctx, secrets.Env{
+		Prog: "hollow",
+		Hosts: func(ctx context.Context, _ string) ([]secrets.Host, error) {
+			c, err := dial()
+			if err != nil {
+				return nil, err
+			}
+			name := c.Name
+			if name == "" {
+				name = "host"
+				if st, err := c.Status(ctx); err == nil {
+					name = st.Name
+				}
+			}
+			return []secrets.Host{{Name: name, Client: c}}, nil
+		},
+	}, rest)
 }
