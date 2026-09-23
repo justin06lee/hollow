@@ -1,6 +1,7 @@
 package host
 
 import (
+	"bytes"
 	"context"
 	"crypto/subtle"
 	"embed"
@@ -12,7 +13,9 @@ import (
 	"net/http"
 	"os"
 	"runtime"
+	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/justin06lee/hollow/api"
 	"github.com/justin06lee/hollow/internal/backend"
@@ -54,6 +57,7 @@ type Server struct {
 	backend backend.Backend
 	images  *image.Manager
 	desks   *Desks
+	vault   *Vault
 	urls    func() []string
 	agent   *http.Client
 	mux     *http.ServeMux
@@ -61,13 +65,14 @@ type Server struct {
 
 // NewServer wires the API to its parts. urls says where clients can reach
 // this host, for status.
-func NewServer(version, token string, b backend.Backend, images *image.Manager, desks *Desks, urls func() []string) *Server {
+func NewServer(version, token string, b backend.Backend, images *image.Manager, desks *Desks, vault *Vault, urls func() []string) *Server {
 	s := &Server{
 		version: version,
 		token:   token,
 		backend: b,
 		images:  images,
 		desks:   desks,
+		vault:   vault,
 		urls:    urls,
 		// No timeout: an exec may legitimately run for minutes and a
 		// recording stop returns a whole file. The caller's context bounds it.
@@ -87,6 +92,9 @@ func NewServer(version, token string, b backend.Backend, images *image.Manager, 
 	m.HandleFunc("GET /v1/desks/{id}/logs", s.handleLogs)
 	m.HandleFunc("/v1/desks/{id}/{rest...}", s.handleAgent)
 	m.HandleFunc("GET /v1/agent/hollow-agent", s.handleAgentBinary)
+	m.HandleFunc("GET /v1/secrets", s.handleSecrets)
+	m.HandleFunc("PUT /v1/secrets/{name}", s.handleSecretSet)
+	m.HandleFunc("DELETE /v1/secrets/{name}", s.handleSecretDelete)
 	return s
 }
 
@@ -208,29 +216,47 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	_, _ = io.WriteString(w, out)
+	_, _ = io.WriteString(w, s.vault.Scrub(out))
 }
 
 // handleAgent forwards everything under a desk to the agent inside it,
 // with the desk's own key. The client's token is not passed on: a guest runs
 // whatever a bot asked it to, and has no business holding the host's key.
+//
+// On the way in, placeholders for secrets are filled in; on the way out,
+// secret values are replaced by their placeholders.
 func (s *Server) handleAgent(w http.ResponseWriter, r *http.Request) {
 	ref := r.PathValue("id")
+	rest := r.PathValue("rest")
 	base, key, err := s.desks.Agent(ref)
 	if err != nil {
 		writeError(w, http.StatusConflict, err)
 		return
 	}
-	target := base + "/" + r.PathValue("rest")
+	target := base + "/" + rest
 	if r.URL.RawQuery != "" {
 		target += "?" + r.URL.RawQuery
 	}
-	req, err := http.NewRequestWithContext(r.Context(), r.Method, target, r.Body)
+	var body io.Reader = r.Body
+	length := r.ContentLength
+	if r.Method == http.MethodPost && fillable[rest] {
+		data, err := io.ReadAll(io.LimitReader(r.Body, maxFillBody))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		if data, err = s.fill(rest, data); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		body, length = bytes.NewReader(data), int64(len(data))
+	}
+	req, err := http.NewRequestWithContext(r.Context(), r.Method, target, body)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	req.ContentLength = r.ContentLength
+	req.ContentLength = length
 	req.Header.Set("Authorization", "Bearer "+key)
 	for _, h := range []string{"Content-Type", "Accept"} {
 		if v := r.Header.Get(h); v != "" {
@@ -246,15 +272,149 @@ func (s *Server) handleAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer resp.Body.Close()
-	for k, vs := range resp.Header {
-		if k == "Content-Type" || k == "Content-Length" || strings.HasPrefix(k, "X-") {
-			for _, v := range vs {
-				w.Header().Add(k, v)
+	copyHeaders := func(skipLength bool) {
+		for k, vs := range resp.Header {
+			if k == "Content-Type" || (k == "Content-Length" && !skipLength) || strings.HasPrefix(k, "X-") {
+				for _, v := range vs {
+					w.Header().Add(k, v)
+				}
 			}
 		}
 	}
+	if ct := resp.Header.Get("Content-Type"); s.vault.Active() && scrubbable(ct, resp.ContentLength) {
+		data, err := io.ReadAll(io.LimitReader(resp.Body, maxScrubBody+1))
+		if err == nil && len(data) <= maxScrubBody {
+			if strings.HasPrefix(ct, "application/json") {
+				data = s.vault.ScrubJSON(data)
+			} else if utf8.Valid(data) {
+				data = []byte(s.vault.Scrub(string(data)))
+			}
+			copyHeaders(true)
+			w.Header().Set("Content-Length", strconv.Itoa(len(data)))
+			w.WriteHeader(resp.StatusCode)
+			_, _ = w.Write(data)
+			return
+		}
+		// Too big to be text anyone reads whole: send what was read, then
+		// the rest, as it is.
+		copyHeaders(true)
+		w.WriteHeader(resp.StatusCode)
+		_, _ = w.Write(data)
+		_, _ = io.Copy(w, resp.Body)
+		return
+	}
+	copyHeaders(false)
 	w.WriteHeader(resp.StatusCode)
 	_, _ = io.Copy(w, resp.Body)
+}
+
+// fillable are the desk routes whose bodies may hold secret placeholders.
+var fillable = map[string]bool{"input": true, "browser/type": true, "exec": true}
+
+const (
+	maxFillBody  = 64 << 20
+	maxScrubBody = 16 << 20
+)
+
+// scrubbable says whether a response from a desk is text that could carry a
+// secret back: JSON, text, and files, which are usually text when they are
+// small. Pictures and video go through untouched.
+func scrubbable(ct string, length int64) bool {
+	if length > maxScrubBody {
+		return false
+	}
+	for _, p := range []string{"application/json", "text/", "application/octet-stream"} {
+		if strings.HasPrefix(ct, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// fill puts secrets into a request for a desk, and the guards that say
+// where they may go. Guards a client sent are thrown away: they are the
+// host's to set.
+func (s *Server) fill(rest string, data []byte) ([]byte, error) {
+	if !bytes.Contains(data, []byte("{{")) && !bytes.Contains(data, []byte(`"guards"`)) {
+		return data, nil
+	}
+	switch rest {
+	case "input":
+		var in api.Input
+		if json.Unmarshal(data, &in) != nil {
+			return data, nil // the agent says what is wrong with it
+		}
+		in.Guards = nil
+		if in.Action == api.InputType {
+			text, guards, err := s.vault.Fill(in.Text, fillTyped)
+			if err != nil {
+				return nil, err
+			}
+			in.Text, in.Guards = text, guards
+		}
+		return json.Marshal(in)
+	case "browser/type":
+		var in api.BrowserType
+		if json.Unmarshal(data, &in) != nil {
+			return data, nil
+		}
+		text, guards, err := s.vault.Fill(in.Text, fillTyped)
+		if err != nil {
+			return nil, err
+		}
+		in.Text, in.Guards = text, guards
+		return json.Marshal(in)
+	case "exec":
+		var in api.Exec
+		if json.Unmarshal(data, &in) != nil {
+			return data, nil
+		}
+		var err error
+		fill := func(p *string) {
+			if err == nil {
+				*p, _, err = s.vault.Fill(*p, fillExec)
+			}
+		}
+		fill(&in.Cmd)
+		fill(&in.Stdin)
+		for i := range in.Args {
+			fill(&in.Args[i])
+		}
+		for i := range in.Env {
+			fill(&in.Env[i])
+		}
+		if err != nil {
+			return nil, err
+		}
+		return json.Marshal(in)
+	}
+	return data, nil
+}
+
+func (s *Server) handleSecrets(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.vault.List())
+}
+
+func (s *Server) handleSecretSet(w http.ResponseWriter, r *http.Request) {
+	var in api.SecretSet
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&in); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	sec, err := s.vault.Set(r.PathValue("name"), in)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, sec)
+}
+
+func (s *Server) handleSecretDelete(w http.ResponseWriter, r *http.Request) {
+	if err := s.vault.Delete(r.PathValue("name")); err != nil {
+		writeError(w, http.StatusNotFound, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
 func (s *Server) handleAgentBinary(w http.ResponseWriter, r *http.Request) {

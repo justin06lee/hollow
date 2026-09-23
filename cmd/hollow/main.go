@@ -71,6 +71,7 @@ client:
   hollow rec      ID start|stop [FILE]    record the screen; stop writes an MP4
   hollow health   ID                      the desk's display and agent
   hollow logs     ID                      the desk's console
+  hollow secret   set|ls|rm|import        the host's vault: secrets agents type as {{name}}
   hollow version
 
 A client finds its host from, in order: --connect CODE, HOLLOW_CONNECT,
@@ -146,6 +147,8 @@ func main() {
 		err = cmdWindows(ctx, args)
 	case "clip", "clipboard":
 		err = cmdClip(ctx, args)
+	case "secret", "secrets", "vault":
+		err = cmdSecret(ctx, args)
 	case "version", "-v", "--version":
 		fmt.Println("hollow", version)
 	case "help", "-h", "--help":

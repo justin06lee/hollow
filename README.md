@@ -158,6 +158,51 @@ hollow rm research
 Desks are named or numbered. Flags go anywhere on the line. Programs run as
 the desk's user, `bot`, with the display set and passwordless `sudo`.
 
+## Secrets
+
+A host keeps a vault, so an agent can log in without being handed a
+password. Store a credential once:
+
+```sh
+hollow secret set github --username octo@example.com --site github.com --totp
+hollow secret import ~/Downloads/passwords.csv    # Chrome, Firefox, Safari, Bitwarden, 1Password
+hollow secret ls
+```
+
+`set` asks for the password (and the TOTP seed) without echo, or reads them
+from stdin with `--stdin`. After that, an agent types placeholders, and the
+host fills them in on the request's way to the desk:
+
+| | |
+|---|---|
+| `{{github}}` | the password |
+| `{{github.username}}` | the account |
+| `{{github.totp}}` | the current one-time code, from the stored seed |
+| `{{aws.token}}` | any other field, by name |
+| `\{{github}}` | the braces themselves |
+
+Placeholders work in typed text (`input` with `type`), `browser/type`, and
+`exec` (its command, arguments, stdin and environment).
+
+- **Values never come back out.** No route reads one. Every text or JSON
+  response from a desk has each vault value swapped for its placeholder, so
+  a page, a file or a command's output shows `{{github}}`, never the
+  password.
+- **A secret with sites stays on them.** Right before typing, the agent in
+  the desk checks where the keystrokes will land: the page's host, HTTPS,
+  and that the keyboard is in a field of that page, not the address bar or
+  a frame from another site. A page that talks an agent into typing
+  `{{bank}}` into its own form is refused. A site-bound secret cannot go
+  into a command at all. A secret with no sites can go anywhere. That suits
+  API tokens, but web logins should always get their site.
+- **On disk** the vault is one AES-256-GCM file, with its key beside it in
+  the state directory. Both are readable by hollow alone. That protects a
+  copied file, not a stolen machine.
+
+The vault keeps secrets out of prompts, transcripts and model context. It
+does not make a desk a vault: once a password is typed into a page, a
+program on the desk that goes looking for it can find it.
+
 ## The API
 
 `Authorization: Bearer <token>` on everything except `hello` and the agent
@@ -180,6 +225,7 @@ download.
 | `PUT` · `GET /v1/desks/{id}/files?path=` | Write and read files. |
 | `POST /v1/desks/{id}/record/start` · `stop` | Record the screen. Stop returns the MP4. |
 | `GET /v1/desks/{id}/health` · `logs` | The agent's view, and the serial console. |
+| `GET /v1/secrets` · `PUT` · `DELETE /v1/secrets/{name}` | The vault: list names, accounts, fields and sites, or store (`SecretSet`) or remove one. No route returns a value. |
 
 The types are in [`api/types.go`](api/types.go) and a Go client is in
 [`client`](client/client.go). Both are importable, which is what bangboo
@@ -240,7 +286,8 @@ cmd/hollow            the CLI, the host (hollow serve), and hollow service
 cmd/hollow-agent      the program inside a desk
 api                   the wire types, shared by host, agent and clients
 client                a Go client for the API, with multi-address failover
-internal/host         the daemon: token, listeners, desks, the API server, the embedded agent
+secrets               the secret command (set, ls, rm, import), shared with bangboo
+internal/host         the daemon: token, listeners, desks, the vault, the API server, the embedded agent
 internal/image        golden images: download, verify, provision, flatten, clean up
 internal/backend      the hypervisor interface, and qemu/ behind it
 internal/agent        what the agent does: capture, input, windows, browser, exec, files, record

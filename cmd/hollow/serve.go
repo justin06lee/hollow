@@ -100,7 +100,11 @@ func cmdServe(ctx context.Context, args []string) error {
 		}
 		return out
 	}
-	srv := host.NewServer(version, token, b, images, desks, urls)
+	vault, err := host.OpenVault(dir)
+	if err != nil {
+		return fmt.Errorf("vault: %w", err)
+	}
+	srv := host.NewServer(version, token, b, images, desks, vault, urls)
 	httpSrv := &http.Server{Handler: srv, ReadHeaderTimeout: 15 * time.Second}
 	ls, err := host.Listen(httpSrv, fixed, p, auto)
 	if err != nil {
@@ -127,6 +131,9 @@ func cmdServe(ctx context.Context, args []string) error {
 		}
 		if *idle > 0 {
 			fmt.Printf("  idle       desks unused for %s are stopped\n", *idle)
+		}
+		if n := len(vault.List()); n > 0 {
+			fmt.Printf("  vault      %d secrets\n", n)
 		}
 		fmt.Printf("  connect    %s\n\n", client.Connect{URLs: urls(), Token: token, Name: host.Hostname()}.Encode())
 	}
