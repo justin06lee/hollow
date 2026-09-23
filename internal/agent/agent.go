@@ -1,13 +1,18 @@
 // Package agent is the program that runs inside a desk.
 //
 // It is small on purpose: it owns nothing and remembers nothing. It grabs the
-// screen, moves the pointer, presses keys, runs programs, moves files, and
-// records video — over plain HTTP on a port only the host can reach. The host
-// forwards a client's request to it nearly verbatim, so the shapes here are
-// the ones in package api.
+// screen, moves the pointer, presses keys, runs programs, moves files, reads
+// and drives the browser, and records video — over plain HTTP on a port only
+// the host is meant to reach. The host forwards a client's request to it
+// nearly verbatim, so the shapes here are the ones in package api.
+//
+// Every request carries the desk's key. The port is forwarded to the host's
+// loopback, and a host on a mesh may publish its loopback ports to every
+// other machine on it; the key is what keeps "only the host" true anyway.
 package agent
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -28,34 +33,57 @@ import (
 type Server struct {
 	disp    *display
 	home    string
+	key     string
 	rec     recorder
+	browser *browser
 	started time.Time
 	version string
 }
 
-// New makes a server for the named display, such as ":0".
-func New(displayName, version string) *Server {
+// New makes a server for the named display, such as ":0", that answers only
+// requests carrying key.
+func New(displayName, version, key string) *Server {
 	home, _ := os.UserHomeDir()
-	return &Server{
+	s := &Server{
 		disp:    &display{name: displayName},
 		home:    home,
+		key:     key,
 		started: time.Now(),
 		version: version,
 	}
+	s.browser = &browser{s: s}
+	return s
 }
 
-// Handler is the agent's routes.
+// Handler is the agent's routes, behind the key.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", s.handleHealth)
 	mux.HandleFunc("GET /screenshot", s.handleScreenshot)
+	mux.HandleFunc("GET /cursor", s.handleCursor)
 	mux.HandleFunc("POST /input", s.handleInput)
 	mux.HandleFunc("POST /exec", s.handleExec)
 	mux.HandleFunc("PUT /files", s.handlePutFile)
 	mux.HandleFunc("GET /files", s.handleGetFile)
 	mux.HandleFunc("POST /record/start", s.handleRecordStart)
 	mux.HandleFunc("POST /record/stop", s.handleRecordStop)
-	return mux
+	mux.HandleFunc("GET /windows", s.handleWindows)
+	mux.HandleFunc("POST /windows", s.handleWindowAction)
+	mux.HandleFunc("GET /clipboard", s.handleClipboardGet)
+	mux.HandleFunc("PUT /clipboard", s.handleClipboardSet)
+	mux.HandleFunc("POST /browser/open", s.handleBrowserOpen)
+	mux.HandleFunc("POST /browser/read", s.handleBrowserRead)
+	mux.HandleFunc("POST /browser/click", s.handleBrowserClick)
+	mux.HandleFunc("POST /browser/type", s.handleBrowserType)
+	mux.HandleFunc("POST /browser/eval", s.handleBrowserEval)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if s.key == "" || subtle.ConstantTimeCompare([]byte(got), []byte(s.key)) != 1 {
+			writeError(w, http.StatusUnauthorized, errors.New("wrong or missing desk key"))
+			return
+		}
+		mux.ServeHTTP(w, r)
+	})
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -66,21 +94,36 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("display %s: %w", s.disp.name, err))
 		return
 	}
+	features := []string{"browser", "windows"}
+	if _, err := lookPath("xclip"); err == nil {
+		features = append(features, "clipboard")
+	}
 	writeJSON(w, http.StatusOK, api.Health{
-		Display: s.disp.name,
-		Width:   width,
-		Height:  height,
-		Uptime:  time.Since(s.started).Seconds(),
-		Agent:   s.version,
+		Display:  s.disp.name,
+		Width:    width,
+		Height:   height,
+		Uptime:   time.Since(s.started).Seconds(),
+		Agent:    s.version,
+		Features: features,
 	})
 }
 
 func (s *Server) handleScreenshot(w http.ResponseWriter, r *http.Request) {
-	img, err := s.disp.Capture()
+	opts, err := parseShot(r.URL.Query())
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	img, screen, err := s.shoot(opts)
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, err)
 		return
 	}
+	b := img.Bounds()
+	w.Header().Set("X-Screen-Width", strconv.Itoa(screen.X))
+	w.Header().Set("X-Screen-Height", strconv.Itoa(screen.Y))
+	w.Header().Set("X-Image-Width", strconv.Itoa(b.Dx()))
+	w.Header().Set("X-Image-Height", strconv.Itoa(b.Dy()))
 	switch r.URL.Query().Get("format") {
 	case "jpeg", "jpg":
 		q := 80
@@ -96,10 +139,18 @@ func (s *Server) handleScreenshot(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (s *Server) handleCursor(w http.ResponseWriter, r *http.Request) {
+	x, y, err := s.disp.Pointer()
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, api.Cursor{X: x, Y: y})
+}
+
 func (s *Server) handleInput(w http.ResponseWriter, r *http.Request) {
 	var in api.Input
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
-		writeError(w, http.StatusBadRequest, err)
+	if !decode(w, r, &in) {
 		return
 	}
 	if err := s.input(in); err != nil {
@@ -111,8 +162,7 @@ func (s *Server) handleInput(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 	var req api.Exec
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, err)
+	if !decode(w, r, &req) {
 		return
 	}
 	res, err := s.exec(req)
@@ -129,6 +179,9 @@ func (s *Server) resolve(p string) (string, error) {
 	p = strings.TrimSpace(p)
 	if p == "" {
 		return "", errors.New("path is required")
+	}
+	if strings.HasPrefix(p, "~/") {
+		p = p[2:]
 	}
 	if !filepath.IsAbs(p) {
 		p = filepath.Join(s.home, p)
@@ -193,16 +246,14 @@ func (s *Server) handleGetFile(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Length", strconv.FormatInt(st.Size(), 10))
+	w.Header().Set("X-Path", p)
 	_, _ = io.Copy(w, f)
 }
 
 func (s *Server) handleRecordStart(w http.ResponseWriter, r *http.Request) {
 	var req api.Record
-	if r.ContentLength != 0 {
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeError(w, http.StatusBadRequest, err)
-			return
-		}
+	if r.ContentLength != 0 && !decode(w, r, &req) {
+		return
 	}
 	width, height, err := s.disp.Size()
 	if err != nil {
@@ -235,6 +286,121 @@ func (s *Server) handleRecordStop(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Length", strconv.FormatInt(st.Size(), 10))
 	}
 	_, _ = io.Copy(w, f)
+}
+
+func (s *Server) handleWindows(w http.ResponseWriter, r *http.Request) {
+	list, err := s.disp.Windows()
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, list)
+}
+
+func (s *Server) handleWindowAction(w http.ResponseWriter, r *http.Request) {
+	var req api.WindowAction
+	if !decode(w, r, &req) {
+		return
+	}
+	if err := s.disp.WindowAction(req.ID, req.Action); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+func (s *Server) handleClipboardGet(w http.ResponseWriter, r *http.Request) {
+	text, err := s.clipboardGet()
+	if err != nil {
+		writeError(w, http.StatusConflict, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, api.Clipboard{Text: text})
+}
+
+func (s *Server) handleClipboardSet(w http.ResponseWriter, r *http.Request) {
+	var c api.Clipboard
+	if !decode(w, r, &c) {
+		return
+	}
+	if err := s.clipboardSet(c.Text); err != nil {
+		writeError(w, http.StatusConflict, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+func (s *Server) handleBrowserOpen(w http.ResponseWriter, r *http.Request) {
+	var req api.BrowserOpen
+	if !decode(w, r, &req) {
+		return
+	}
+	res, err := s.browser.open(r.Context(), req)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+func (s *Server) handleBrowserRead(w http.ResponseWriter, r *http.Request) {
+	var req api.BrowserRead
+	if r.ContentLength != 0 && !decode(w, r, &req) {
+		return
+	}
+	st, err := s.browser.read(r.Context(), req)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, st)
+}
+
+func (s *Server) handleBrowserClick(w http.ResponseWriter, r *http.Request) {
+	var req api.BrowserClick
+	if !decode(w, r, &req) {
+		return
+	}
+	res, err := s.browser.click(r.Context(), req)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+func (s *Server) handleBrowserType(w http.ResponseWriter, r *http.Request) {
+	var req api.BrowserType
+	if !decode(w, r, &req) {
+		return
+	}
+	res, err := s.browser.typeInto(r.Context(), req)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+func (s *Server) handleBrowserEval(w http.ResponseWriter, r *http.Request) {
+	var req api.BrowserEval
+	if !decode(w, r, &req) {
+		return
+	}
+	res, err := s.browser.eval(r.Context(), req)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+func decode(w http.ResponseWriter, r *http.Request, v any) bool {
+	if err := json.NewDecoder(r.Body).Decode(v); err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("bad request body: %w", err))
+		return false
+	}
+	return true
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
