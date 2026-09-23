@@ -8,9 +8,14 @@ package image
 // a service that fetches the agent from the host at every boot. The result
 // is powered off and every desk is a copy-on-write clone of it.
 //
+// linuxRecipe numbers this script. Bump it whenever the script changes what a
+// desk has, so that hosts with an image built from an older one can say so.
+//
 // Alpine, because it is the smallest thing that has a package for everything
 // here. Idle, the whole desk is well under a hundred megabytes; the browser
 // is what costs memory, and the browser would cost the same anywhere.
+const linuxRecipe = 3
+
 const linuxProvision = `#!/bin/sh
 cat > /root/hollow-provision.sh <<'BODY'
 set -eu
@@ -23,8 +28,16 @@ fi
 echo "hollow: installing packages"
 apk update
 apk add --no-cache xvfb xdotool openbox xterm ffmpeg chromium \
-	font-dejavu font-noto font-noto-emoji dbus doas sudo curl \
-	xsetroot xrandr xset xdpyinfo mesa-dri-gallium
+	font-dejavu font-noto font-noto-emoji font-noto-cjk dbus doas sudo curl \
+	xsetroot xrandr xset xdpyinfo xclip mesa-dri-gallium \
+	bash coreutils findutils grep sed git python3 jq file unzip
+
+# Chromium's own flags, for however it is started: no first-run questions,
+# and no keyring prompt that no one is there to answer.
+mkdir -p /etc/chromium
+cat > /etc/chromium/chromium.conf <<'CHROMIUM'
+CHROMIUM_FLAGS="--no-first-run --no-default-browser-check --password-store=basic --hide-crash-restore-bubble"
+CHROMIUM
 
 echo "hollow: creating the bot user"
 if ! id bot >/dev/null 2>&1; then
@@ -104,6 +117,20 @@ start_pre() {
 	done
 	touch /var/log/hollow-session.log
 	chown bot:bot /var/log/hollow-session.log
+
+	# Compressed swap in RAM, as big as RAM. A browser's working set
+	# compresses three or four to one, so a small desk behaves like one twice
+	# its size instead of thrashing when a heavy page loads.
+	if modprobe zram 2>/dev/null && [ -e /sys/block/zram0 ] && ! grep -q zram0 /proc/swaps; then
+		for alg in zstd lz4 lzo-rle lzo; do
+			grep -qw "$alg" /sys/block/zram0/comp_algorithm && { echo "$alg" > /sys/block/zram0/comp_algorithm; break; }
+		done
+		awk '/MemTotal/ {print $2 * 1024}' /proc/meminfo > /sys/block/zram0/disksize
+		mkswap /dev/zram0 >/dev/null && swapon -p 100 /dev/zram0
+		sysctl -qw vm.swappiness=100 vm.page-cluster=0 2>/dev/null
+	fi
+	# Hands memory the guest frees back to the host.
+	modprobe virtio_balloon 2>/dev/null
 	return 0
 }
 SERVICE

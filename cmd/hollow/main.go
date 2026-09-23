@@ -43,10 +43,14 @@ func resolveVersion() string {
 
 const usage = `hollow — computers for bots.
 
-usage:
+host:
   hollow serve    [flags]                 run the host: images, desks, the API
+  hollow service  install|uninstall|status   run it as a systemd service (Linux, root)
+  hollow connect  [--url URL] [--json]    print a connect code for the host on this machine
+
+client:
   hollow status                           what the host has
-  hollow pull     [linux]                 build the golden image; once, a few minutes
+  hollow pull     [linux]                 build or update the golden image
   hollow new      [flags]                 boot a desk and wait until it can be driven
   hollow ls                               running desks
   hollow rm       ID...                   stop desks
@@ -60,16 +64,20 @@ usage:
   hollow exec     ID [flags] -- CMD...    run a program on the desk
   hollow put      ID LOCAL REMOTE         copy a file onto the desk
   hollow get      ID REMOTE LOCAL         copy a file off the desk
+  hollow open     ID URL                  open a page in the desk's browser
+  hollow read     ID                      the page as text, with numbered elements
+  hollow windows  ID                      the desk's windows
+  hollow clip     ID [TEXT]               read or set the desk's clipboard
   hollow rec      ID start|stop [FILE]    record the screen; stop writes an MP4
   hollow health   ID                      the desk's display and agent
   hollow logs     ID                      the desk's console
-  hollow connect  [--url URL]             print a connect code for this host
   hollow version
 
 A client finds its host from, in order: --connect CODE, HOLLOW_CONNECT,
 HOLLOW_URL with HOLLOW_TOKEN, or the token of a host on this machine
 (HOLLOW_HOME; /var/lib/hollow as root, ~/.local/share/hollow otherwise)
-at http://127.0.0.1:7070.
+at http://127.0.0.1:7070. An agent wants bangboo instead: the same desks,
+as tools.
 
 run "hollow <command> -h" for the rest.
 `
@@ -127,7 +135,17 @@ func main() {
 	case "logs", "log":
 		err = cmdLogs(ctx, args)
 	case "connect":
-		err = cmdConnect(args)
+		err = cmdConnect(ctx, args)
+	case "service":
+		err = cmdService(ctx, args)
+	case "open":
+		err = cmdOpen(ctx, args)
+	case "read":
+		err = cmdRead(ctx, args)
+	case "windows", "win":
+		err = cmdWindows(ctx, args)
+	case "clip", "clipboard":
+		err = cmdClip(ctx, args)
 	case "version", "-v", "--version":
 		fmt.Println("hollow", version)
 	case "help", "-h", "--help":

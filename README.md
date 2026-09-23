@@ -5,220 +5,243 @@
 # hollow
 
 **Computers for bots.**<br>
-*One host boots a small VM per agent and lets it see and drive the screen — self-hosted, on whatever machine has the memory.*
+*One host boots a small VM per agent and lets it see and drive the screen. It is self-hosted, on whatever machine has the memory.*
 
 </div>
 
 ---
 
-hollow is the machine room of a Grok-Bot-style setup: an always-on computer for
-every agent, with a browser, a terminal and a filesystem that persist while
-it works. One host builds a golden image per guest OS, boots a **desk** — a
-VM with a virtual display — for every bot that asks, and answers one HTTP
-API for screenshots, input, programs, files and screen recording.
+hollow is the machine room of a Grok-Bot-style setup: an always-on computer
+for every agent, with a browser, a terminal and a filesystem. A host builds a
+golden image per guest OS and boots a **desk** for every bot that asks. A
+desk is a VM with a virtual display. The host answers one HTTP API for
+screenshots, input, the browser as text, programs, files and screen
+recording.
 
-It is the bottom of three pieces. **hollow** owns the VMs and the API.
-[bangboo](https://github.com/justin06lee/bangboo) is the client that goes into
-a desk on an agent's behalf. [phaethon](https://github.com/justin06lee/phaethon)
-is the skill that tells the agent how to use bangboo well.
+It is the bottom of three pieces, and each works on its own:
 
-A Linux desk idles at well under a hundred megabytes. What costs memory is
-what the bot runs on it, and a browser costs the same anywhere — so the host
-defaults to 768 MB per desk and lets you turn that down or up.
+- **hollow** owns the VMs and the API. Run it on any Linux box with KVM.
+- [bangboo](https://github.com/justin06lee/bangboo) is what an agent talks to.
+  It is an MCP server and a CLI over any number of hollow hosts.
+- [phaethon](https://github.com/justin06lee/phaethon) is the one thing to
+  install. It carries both of the others, registers bangboo with every agent
+  harness on the machine, and turns any machine ssh reaches into a host.
+
+A desk is 1 GB by default and idles at under a hundred megabytes of that.
+Compressed swap lets it behave like a machine twice its size when a heavy
+page loads. Memory it frees goes back to the host.
 
 ## Install
 
-On the machine that will run the VMs — a Linux box with KVM — and on any
-machine you want the CLI on:
+The quickest way is phaethon, which installs hollow on a machine for you:
 
 ```sh
-git clone https://github.com/justin06lee/hollow && cd hollow && make
+phaethon host add tenet          # any Linux machine with KVM that ssh reaches
 ```
 
-`make` builds the guest agent into the hollow binary, installs `hollow` on
-your PATH, and prints what to do next. Needs Go 1.25 or newer. The host needs
-`qemu-system-x86_64` and `qemu-img` (`pacman -S qemu-base qemu-img`,
-`apt install qemu-system-x86 qemu-utils`) and access to `/dev/kvm`.
-
-The box the VMs run on is often not the machine the code is edited on:
+On its own, from a clone:
 
 ```sh
-make ship HOST=root@box      # build for linux/amd64 and install it there over ssh
+make                             # build hollow, with the guest agent inside it, and install it
+make ship HOST=root@tenet.makima # or: build for linux/amd64 and install it there as a service
 ```
 
-## Run the host
+Needs Go 1.25 or newer to build. A host needs an x86_64 Linux machine with
+`/dev/kvm`. QEMU is installed for you if it is missing.
+
+## Run a host
+
+On the machine that will run the VMs:
 
 ```sh
-hollow serve
+sudo hollow service install
 ```
 
-```
-hollow v0.1.0 — listening on 127.0.0.1:7070
+That is the whole setup, and it is what phaethon and `make ship` run. The
+binary copies itself to `/usr/local/bin`, installs QEMU with the machine's
+package manager if needed, and creates a `hollow` user in the `kvm` group. It
+then registers a systemd unit that starts at boot and prints a connect code.
+State lives in `/var/lib/hollow`. A hollow that was run by hand as root
+carries its images and token over.
 
-  state    /var/lib/hollow
-  backend  qemu with kvm
-  image    linux   missing — run: hollow pull linux
-  connect  hollow1-eyJ1IjoiaHR0cDovLzEyNy4wLjAuMTo3MDcwIiwidCI6Ik…
-```
-
-Then, once:
+Then build the Linux image, once:
 
 ```sh
 hollow pull linux
 ```
 
-That downloads Alpine's stock cloud image, checks its checksum, boots it with
-a provisioning script that installs the desktop and the agent hook, and keeps
-the powered-off result as the golden image. A few minutes, and every desk
-from then on is a copy-on-write clone of it.
-
-To have it survive reboots and ssh sessions, on Linux:
+This downloads Alpine's cloud image and checks its checksum. It boots the
+image once with a provisioning script and keeps the flattened result as the
+golden image. That takes a few minutes, and every desk after that is a
+copy-on-write clone that boots in about twenty seconds.
 
 ```sh
-make service            # a systemd unit, its own user in the kvm group, state in /var/lib/hollow
-journalctl -u hollow -f
+hollow service status          # is it running, and answering
+sudo hollow service uninstall  # stop it; --purge also deletes images and the token
+journalctl -u hollow -f        # its log
+```
+
+To run it in the foreground instead:
+
+```sh
+hollow serve
 ```
 
 | Flag | What it does |
 |---|---|
-| `--addr 127.0.0.1:7070` | Address to listen on. Loopback by default; see below before changing it. Bound elsewhere, it keeps answering on loopback too, which is where desks fetch the agent from. |
+| `--addr HOST:PORT,...` | Listen exactly here, instead of loopback plus every mesh address. |
+| `--port 7070` | The port for the default addresses. `HOLLOW_PORT` does the same. |
 | `--state DIR` | Where images, desks and the token live. `HOLLOW_HOME` does the same. |
-| `--advertise URL` | The address to put in the printed connect code, when clients reach this host by another name. |
+| `--advertise URL` | A URL to put first in connect codes. |
+| `--idle 2h` | Stop desks nobody has used for this long. The default, 0, never stops them. |
 | `--quiet` | Print nothing but errors. |
+
+## Where it listens
+
+A host listens on loopback and on every address the machine has on an
+overlay network, and nowhere else. Overlay networks here mean makima,
+Tailscale and plain WireGuard, which are exactly its point-to-point
+interfaces. The LAN and the internet never see the port. Interfaces are
+looked at again every ten seconds, so a mesh that starts after hollow is
+picked up.
+
+On a [makima](https://github.com/justin06lee/makima) mesh that publishes
+loopback services, hollow and makima may both want the mesh address. Either
+one holding it is fine.
 
 ## Connect from another machine
 
-The API is bearer-token authenticated and listens on loopback. It is meant to
-be reached through a mesh rather than exposed: on a
-[makima](https://github.com/justin06lee/makima) mesh, every loopback listener
-is published automatically, so the host is at `box.makima:7070` from every
-other machine with nothing to configure. Tailscale and a plain LAN work the
-same way with `--addr`.
-
-A **connect code** is the address and the token in one string. Mint one for
-the address clients will use, on the host:
+A **connect code** is the host's name, every address it answers at, and its
+token, in one string:
 
 ```sh
-hollow connect --url http://box.makima:7070
+hollow connect --url http://tenet.makima:7070    # --url puts that address first
 ```
 
-and paste it wherever hollow or bangboo runs:
+Give it to bangboo on the machine where agents run:
 
 ```sh
-export HOLLOW_CONNECT=hollow1-…
-hollow status
+bangboo host add hollow1-…
 ```
 
-`HOLLOW_URL` and `HOLLOW_TOKEN` are the two halves, for anything that would
-rather not carry one string. On the host itself the CLI needs neither: it
-reads the token from the state directory.
+Or set it for the hollow CLI with `export HOLLOW_CONNECT=hollow1-…`. A
+client uses the first address in the code that answers as the right host,
+and moves to another when that one stops answering. phaethon does all of
+this for you.
 
-## Use a desk
+## Use a desk from the command line
+
+The hollow CLI is the low-level client. An agent wants
+[bangboo](https://github.com/justin06lee/bangboo), which offers the same
+desks as tools.
 
 ```sh
-hollow new                          # boots a desk, waits until it can be driven, prints its id
-hollow new --name maya --mem 512 --size 1440x900
+hollow new --name research            # boot a desk, wait until it can be driven, print its id
 hollow ls
+hollow shot research                  # a PNG of the screen, with the pointer
+hollow open research example.com      # open a page in the desk's Chromium
+hollow read research                  # the page as text, with numbered elements
+hollow click research 640 400
+hollow type research hello there
+hollow key research ctrl+l
+hollow exec research -- ls -la
+hollow exec research --shell -- 'echo $DISPLAY'
+hollow windows research
+hollow clip research                  # read the clipboard; give text to set it
+hollow put research notes.txt notes.txt
+hollow get research out.png out.png
+hollow rec research start
+hollow rec research stop clip.mp4
+hollow rm research
 ```
 
-```sh
-hollow shot a1b2c3                  # a PNG of the screen, with the pointer
-hollow exec a1b2c3 --detach -- chromium https://example.com
-hollow click a1b2c3 640 400
-hollow type a1b2c3 hello there
-hollow key a1b2c3 ctrl+l
-hollow scroll a1b2c3 5
-hollow drag a1b2c3 100 100 400 300
-hollow exec a1b2c3 -- ls -la
-hollow exec a1b2c3 --shell -- 'echo $DISPLAY && date'
-hollow put a1b2c3 notes.txt notes.txt
-hollow get a1b2c3 out.png out.png
-hollow rec a1b2c3 start
-hollow rec a1b2c3 stop clip.mp4
-hollow rm a1b2c3
-```
-
-Programs run as the desk's user, `bot`, with the display set, passwordless
-`sudo` and `doas`, and a home directory that lasts as long as the desk does.
-`exec` waits up to a minute by default and returns stdout, stderr and the
-exit code; `--detach` starts something and returns its pid.
+Desks are named or numbered. Flags go anywhere on the line. Programs run as
+the desk's user, `bot`, with the display set and passwordless `sudo`.
 
 ## The API
 
-Everything the CLI does is one request. `Authorization: Bearer <token>` on
-all of it.
+`Authorization: Bearer <token>` on everything except `hello` and the agent
+download.
 
 | | |
 |---|---|
-| `GET /v1/status` | Version, backend, images, desk count. |
-| `GET /v1/images` · `GET /v1/images/{os}` | Golden images and their state. |
-| `POST /v1/images/{os}/pull` | Build one. Returns at once; poll. |
-| `GET /v1/desks` · `POST /v1/desks` | List desks; boot one from a `DeskSpec`. |
-| `GET /v1/desks/{id}` · `DELETE /v1/desks/{id}` | One desk; stop it. |
-| `GET /v1/desks/{id}/screenshot` | PNG. `?format=jpeg&quality=80` for smaller. |
-| `POST /v1/desks/{id}/input` | One `Input`: move, click, dblclick, down, up, scroll, type, key, drag. |
-| `POST /v1/desks/{id}/exec` | Run an `Exec`; get an `ExecResult`. |
-| `PUT /v1/desks/{id}/files?path=` · `GET …/files?path=` | Write and read files on the desk. |
-| `POST /v1/desks/{id}/record/start` · `…/record/stop` | Record the screen; stop returns the MP4. |
-| `GET /v1/desks/{id}/health` · `GET /v1/desks/{id}/logs` | The agent's view; the serial console. |
+| `GET /v1/hello` | That a hollow is here, its version and name. It needs no token, which is how scans find hosts. |
+| `GET /v1/status` | Version, capacity, addresses, images, desk count. |
+| `GET /v1/images` · `GET /v1/images/{os}` · `POST /v1/images/{os}/pull` | Golden images and their state. A pull returns at once, so poll it. |
+| `GET /v1/desks` · `POST /v1/desks` | List desks, or boot one from a `DeskSpec`. A name already in use gets a 409. |
+| `GET /v1/desks/{id}` · `DELETE /v1/desks/{id}` | One desk, by id or name, or stop it. |
+| `GET /v1/desks/{id}/screenshot` | PNG. The query takes `x,y,w,h` for a region, `fit=WxH` to scale, `settle=MS` to wait for the screen to stop changing, and `format=jpeg`. |
+| `POST /v1/desks/{id}/input` | One `Input`: move, click, dblclick, tripleclick, down, up, scroll, type, key, hold, drag. Modifiers can be held. |
+| `GET /v1/desks/{id}/cursor` | Where the pointer is. |
+| `POST /v1/desks/{id}/browser/open` · `read` · `click` · `type` · `eval` | Chromium over DevTools. A read returns the page as text with numbered elements, and click and type take those numbers. |
+| `GET` · `POST /v1/desks/{id}/windows` | List windows, or activate or close one. |
+| `GET` · `PUT /v1/desks/{id}/clipboard` | Read or set the clipboard. |
+| `POST /v1/desks/{id}/exec` | Run an `Exec` and get back an `ExecResult`. |
+| `PUT` · `GET /v1/desks/{id}/files?path=` | Write and read files. |
+| `POST /v1/desks/{id}/record/start` · `stop` | Record the screen. Stop returns the MP4. |
+| `GET /v1/desks/{id}/health` · `logs` | The agent's view, and the serial console. |
 
-The types are in [`api/types.go`](api/types.go) and a Go client in
-[`client`](client/client.go) — both importable, which is what bangboo does.
+The types are in [`api/types.go`](api/types.go) and a Go client is in
+[`client`](client/client.go). Both are importable, which is what bangboo
+does.
 
 ## How it works
 
-**Images.** `hollow pull linux` fetches Alpine's cloud image and boots it once
-with a script handed in over a virtual CD-ROM as cloud-init user-data. The
-script installs Xvfb, a window manager, Chromium, xdotool and ffmpeg, makes
-the `bot` user, installs a boot service, and powers off. Alpine because it is
-the smallest thing with a package for everything on that list.
+**Images.** A pull boots Alpine's cloud image once, with a script handed in
+on a virtual CD-ROM. The script installs Xvfb, Openbox, Chromium, xdotool,
+ffmpeg, xclip, fonts including CJK, python3 and git. It also creates the
+`bot` user and a boot service, then powers off. The result is flattened into
+a standalone golden disk with a new name, so pulling again never touches the
+disk under a running desk. Old golden disks are deleted once no desk uses
+them. The script has a recipe number, and a host with an image from an older
+recipe says so.
 
-**Desks.** A desk is a QEMU/KVM VM booted from a copy-on-write overlay of the
-golden image, with a second small CD-ROM holding its configuration — hollow's
-port, the screen size, its name. At boot the service reads that, starts a
-virtual display at the requested size, and fetches the **agent** from the
-host. The agent is built into the hollow binary and handed out at every boot,
-so a new hollow never needs a new image.
+**Desks.** A desk is a QEMU/KVM VM booted from an overlay of the golden
+disk. A second small CD-ROM holds its configuration: the host's port, the
+screen size, its name, and a random key. At boot it starts compressed swap
+and a virtual display, then fetches the **agent** from the host. The agent
+is built into the hollow binary, so a new hollow never needs a new image.
 
-**The agent.** A small program inside the desk that answers the host on a
-port only the host can reach: it grabs the screen straight from X and
-composites the cursor on, drives input through xdotool, runs programs as the
-desk's user, and records with ffmpeg. The host forwards a client's request to
-it nearly verbatim, which is why the API has one vocabulary end to end.
+**The agent.** This small program inside the desk answers only requests
+carrying the desk's key. That matters because a mesh like makima publishes
+every loopback port, desks' included. The agent grabs the screen from X and
+composites the cursor on, and it waits for the screen to settle when asked.
+It drives input through xdotool, reads windows from the window manager, and
+runs programs as the desk's user. It drives Chromium over the DevTools
+protocol and records with ffmpeg. Browser calls carry deadlines, and they
+report when a desk is out of memory instead of hanging.
 
-**Isolation.** One VM per bot. Sharing a VM between bots through separate
-virtual desktops was the first idea, and it does not hold: desktops share a
-pointer and a focus, and a bot on one can still take it from the other. A
-separate VM costs a few tens of megabytes over a separate desktop and takes
-the question away entirely.
+**Isolation.** Each bot gets its own VM. Desktops inside one VM would share
+a pointer, a keyboard focus and a clipboard, and a bot on one could take
+them from another. A separate VM costs a few tens of megabytes more and
+removes the question.
 
 ## Known limits
 
-- **Linux guests only, on a Linux host with KVM.** The backend is behind an
-  interface so that macOS guests — which can only run on Apple hardware, under
-  Apple's Virtualization framework — and Windows guests can follow. Neither is
-  here yet.
-- **Desks do not survive the host.** A desk is a running VM and nothing else;
-  restart `hollow serve` and they are gone. Persistent homes are the next
+- **Linux guests only, on an x86_64 Linux host with KVM.** The hypervisor is
+  behind an interface so that macOS guests can follow. Those need Apple
+  hardware and Apple's Virtualization framework. Windows guests can follow
+  too. Neither is here yet.
+- **Desks do not survive the host.** A desk is a running VM and nothing else.
+  Restarting or upgrading hollow stops them. Persistent homes are the next
   thing to add.
-- **The API is HTTP.** It is designed to sit on a mesh or loopback, where the
-  transport is already encrypted and authenticated. Bind it to a public
-  address and the token is the only thing between the internet and a shell.
+- **The API is HTTP.** It is meant for loopback and meshes, where the
+  transport is already encrypted and authenticated. Bound to a public address
+  with `--addr`, the token is the only thing between the internet and a shell.
 - **A guest can reach the host's loopback.** QEMU's user networking maps the
-  host to `10.0.2.2` inside the guest, which is how the agent is fetched. The
-  API needs the token, which the guest does not have; anything else you run on
-  the host's loopback is reachable from a desk.
+  host to `10.0.2.2`, which is how the agent is fetched. The API needs the
+  token, and desks' agents need their keys. Anything else on the host's
+  loopback is reachable from a desk.
 
 ## Layout
 
 ```
-cmd/hollow            the CLI and the host (hollow serve)
+cmd/hollow            the CLI, the host (hollow serve), and hollow service
 cmd/hollow-agent      the program inside a desk
 api                   the wire types, shared by host, agent and clients
-client                a Go client for the API
-internal/host         the daemon: token, desks, the API server, the embedded agent
-internal/image        golden images: download, verify, provision, keep
+client                a Go client for the API, with multi-address failover
+internal/host         the daemon: token, listeners, desks, the API server, the embedded agent
+internal/image        golden images: download, verify, provision, flatten, clean up
 internal/backend      the hypervisor interface, and qemu/ behind it
-internal/agent        what the agent does: capture, input, exec, files, record
-dist                  the systemd unit
+internal/agent        what the agent does: capture, input, windows, browser, exec, files, record
 ```

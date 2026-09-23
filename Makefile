@@ -6,7 +6,7 @@
 #   make update     stop a running host, reinstall, start it again
 #
 #   make service    run the host as a systemd service, surviving reboots (Linux)
-#   make ship HOST=root@box   build for linux/amd64 and install on that machine over ssh
+#   make ship HOST=user@box   build for linux/amd64 and install it there as a service, over ssh
 
 BINARY  := hollow
 BUILD   := build
@@ -86,34 +86,25 @@ check-path:
 	@case ":$$PATH:" in *":$(BINDIR):"*) ;; *) \
 		echo; echo "  $(BINDIR) is not on your PATH; add it:"; echo "      export PATH=\"$(BINDIR):\$$PATH\"";; esac
 
-# The host as a service: its own user, in the kvm group, state under
-# /var/lib/hollow. Kept out of `make` on purpose — installing something that
-# starts at boot is a bigger thing to do to a machine than copying a binary.
-service: install
-	@if [ "$$(uname -s)" != Linux ]; then echo "  make service installs a systemd unit, and this machine is not Linux."; exit 1; fi
-	@id hollow >/dev/null 2>&1 || sudo useradd --system --home-dir /var/lib/hollow --shell /usr/sbin/nologin hollow
-	@sudo usermod -aG kvm hollow
-	@sed 's|@BINDIR@|$(BINDIR)|g' dist/hollow.service | sudo tee /etc/systemd/system/hollow.service >/dev/null
-	@sudo systemctl daemon-reload
-	@sudo systemctl enable --now hollow
-	@sleep 1
-	@echo "  hollow is running as a service; its connect code:"
-	@sudo HOLLOW_HOME=/var/lib/hollow $(BINDIR)/$(BINARY) connect | sed 's/^/      /'
-	@echo "  logs:  journalctl -u hollow -f"
+# The host as a service, installed by the binary itself: its own user in the
+# kvm group, state in /var/lib/hollow, QEMU installed if missing. Kept out of
+# `make` on purpose — installing something that starts at boot is a bigger
+# thing to do to a machine than copying a binary.
+service: build
+	@sudo $(BUILD)/$(BINARY) service install
 
 unservice:
-	@sudo systemctl disable --now hollow 2>/dev/null || true
-	@sudo rm -f /etc/systemd/system/hollow.service
-	@sudo systemctl daemon-reload
+	@sudo $(BINDIR)/$(BINARY) service uninstall
 
-# Build here, install there. The box that runs VMs is often not the machine
-# the code is edited on.
+# Build here, install there as a service. The box that runs VMs is often not
+# the machine the code is edited on. HOST is anything ssh reaches:
+# root@tenet.makima, me@100.101.102.103.
 ship: build-linux
-	@test -n "$(HOST)" || { echo "usage: make ship HOST=root@box"; exit 1; }
+	@test -n "$(HOST)" || { echo "usage: make ship HOST=user@box"; exit 1; }
 	@echo "  ship $(BINARY) $(VERSION) -> $(HOST)"
-	@ssh "$(HOST)" 'cat > /tmp/hollow.new && install -m 0755 /tmp/hollow.new /usr/local/bin/hollow && rm -f /tmp/hollow.new && \
-		if systemctl is-active --quiet hollow 2>/dev/null; then systemctl restart hollow && echo "  restarted the hollow service"; fi && \
-		hollow version' < $(BUILD)/$(BINARY)-linux-amd64
+	@ssh "$(HOST)" 'cat > /tmp/hollow.new && chmod 0755 /tmp/hollow.new && \
+		if [ "$$(id -u)" = 0 ]; then /tmp/hollow.new service install --quiet >/dev/null; else sudo -n /tmp/hollow.new service install --quiet >/dev/null; fi; \
+		rc=$$?; rm -f /tmp/hollow.new; [ $$rc = 0 ] && hollow version' < $(BUILD)/$(BINARY)-linux-amd64
 
 check: fmt vet test race
 

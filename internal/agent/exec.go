@@ -139,3 +139,5 @@ func (b *limitedBuffer) String() string {
 	}
 	return b.buf.String()
 }
+
+func lookPath(name string) (string, error) { return exec.LookPath(name) }

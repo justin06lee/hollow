@@ -79,6 +79,10 @@ func (b *Backend) Start(ctx context.Context, spec backend.Spec) (backend.VM, err
 		"-vga", "none",
 		"-serial", "file:" + console,
 		"-device", "virtio-rng-pci",
+		// Free page reporting: memory the guest frees goes back to the
+		// host, so a desk that loaded something heavy once does not hold
+		// on to it for the rest of its life.
+		"-device", "virtio-balloon-pci,free-page-reporting=on",
 		"-drive", "file=" + spec.Disk + ",if=virtio,format=qcow2,cache=writeback,discard=unmap",
 		"-netdev", fmt.Sprintf("user,id=net0,hostfwd=tcp:127.0.0.1:%d-:%d", spec.AgentPort, api.AgentPort),
 		"-device", "virtio-net-pci,netdev=net0",
