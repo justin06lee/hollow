@@ -620,3 +620,21 @@ func (c *Client) BrowserEval(ctx context.Context, id string, js string) (json.Ra
 	var out api.BrowserEvalResult
 	return out.Value, c.doJSON(ctx, http.MethodPost, deskPath(id)+"/browser/eval", api.BrowserEval{JS: js}, &out)
 }
+
+// Secrets lists the host's vault: names, accounts, fields and sites. Values
+// never leave the host.
+func (c *Client) Secrets(ctx context.Context) ([]api.Secret, error) {
+	var out []api.Secret
+	return out, c.doJSON(ctx, http.MethodGet, "/v1/secrets", nil, &out)
+}
+
+// SetSecret stores a secret in the host's vault.
+func (c *Client) SetSecret(ctx context.Context, name string, in api.SecretSet) (api.Secret, error) {
+	var out api.Secret
+	return out, c.doJSON(ctx, http.MethodPut, "/v1/secrets/"+url.PathEscape(name), in, &out)
+}
+
+// DeleteSecret removes a secret from the host's vault.
+func (c *Client) DeleteSecret(ctx context.Context, name string) error {
+	return c.doJSON(ctx, http.MethodDelete, "/v1/secrets/"+url.PathEscape(name), nil, nil)
+}

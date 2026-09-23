@@ -140,6 +140,10 @@ type Input struct {
 	DX         int    `json:"dx,omitempty"`
 	DY         int    `json:"dy,omitempty"`
 	DurationMS int    `json:"duration_ms,omitempty"` // for hold
+
+	// Guards are set by the host, never by a client: when Text had secrets
+	// filled into it, where each of them may be typed.
+	Guards []Guard `json:"guards,omitempty"`
 }
 
 // Cursor is where the pointer is.
@@ -262,6 +266,9 @@ type BrowserType struct {
 	Text   string `json:"text"`
 	Clear  bool   `json:"clear,omitempty"`  // replace what is there
 	Submit bool   `json:"submit,omitempty"` // press Enter afterwards
+
+	// Guards: as for Input.
+	Guards []Guard `json:"guards,omitempty"`
 }
 
 // BrowserEval runs JavaScript in the page.
@@ -278,6 +285,53 @@ type BrowserEvalResult struct {
 type BrowserResult struct {
 	URL       string `json:"url"`
 	Navigated bool   `json:"navigated,omitempty"`
+}
+
+// Secrets.
+//
+// A host keeps a vault of credentials, and a client never reads a value back
+// out of it. Text sent to a desk to be typed — input, browser type, exec —
+// may hold placeholders, and the host fills them in on its way to the desk:
+//
+//	{{github}}           the secret's password (or its only field)
+//	{{github.username}}  its username
+//	{{github.totp}}      the current one-time code, from its TOTP seed
+//	{{aws.token}}        any other field, by name
+//	\{{github}}          the braces themselves, typed as they are
+//
+// A secret with sites is only ever typed into pages on those sites; the
+// guest checks where the text is going before it types. Whatever comes back
+// from a desk has every secret value in the vault replaced by its
+// placeholder, so an agent reading a page, a file or a command's output
+// never sees one.
+
+// Secret is one credential as the world outside the host sees it: its
+// name, which account it is, what fields it holds, and where it may go. The
+// values stay on the host.
+type Secret struct {
+	Name     string    `json:"name"`
+	Username string    `json:"username,omitempty"` // not a secret: says which account
+	Fields   []string  `json:"fields"`             // password, totp, token, ...
+	Sites    []string  `json:"sites,omitempty"`    // where it may be typed; none: anywhere
+	Updated  time.Time `json:"updated"`
+}
+
+// SecretSet stores a secret. It replaces the old one, unless Merge is set:
+// then only the fields given change, and a field given as "" is removed.
+type SecretSet struct {
+	Username *string           `json:"username,omitempty"`
+	Fields   map[string]string `json:"fields,omitempty"`
+	Sites    []string          `json:"sites,omitempty"`
+	Anywhere bool              `json:"anywhere,omitempty"` // with Merge: drop the sites
+	Merge    bool              `json:"merge,omitempty"`
+}
+
+// Guard says where one filled-in secret may be typed: into a page whose
+// host is one of Sites or under one. A site given as http://host also
+// allows plain HTTP; otherwise the page must be HTTPS.
+type Guard struct {
+	Secret string   `json:"secret"`
+	Sites  []string `json:"sites"`
 }
 
 // Error is the body of every non-2xx response.

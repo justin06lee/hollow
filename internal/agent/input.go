@@ -119,6 +119,9 @@ func (s *Server) input(in api.Input) error {
 		if in.Text == "" {
 			return errors.New("type needs text")
 		}
+		if err := s.guardKeyboard(in.Guards); err != nil {
+			return err
+		}
 		// --file - takes the text on stdin, so nothing in it is ever mistaken
 		// for an option and there is no argument length to run into.
 		return s.xdotool([]string{"type", "--clearmodifiers", "--delay", "8", "--file", "-"}, in.Text)

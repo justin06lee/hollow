@@ -565,6 +565,22 @@ func (b *browser) typeInto(ctx context.Context, req api.BrowserType) (res0 api.B
 		}
 	}
 	if req.Text != "" {
+		if len(req.Guards) > 0 {
+			// Checked here, after the click and just before the text goes
+			// in, in the tab it goes into: a page cannot move in between.
+			// Where the keyboard is, not just which page: a frame from
+			// another site laid over the field would take the text.
+			var f keyboardFocus
+			if err := c.eval(ctx, focusScript, &f); err != nil {
+				return api.BrowserResult{}, err
+			}
+			if f.CrossOrigin {
+				return api.BrowserResult{}, fmt.Errorf("refused: clicking element %d put the keyboard in a frame from another site (%s), where a secret cannot be checked", req.Index, f.Frame)
+			}
+			if err := checkGuards(f.Href, req.Guards); err != nil {
+				return api.BrowserResult{}, err
+			}
+		}
 		if err := c.call(ctx, "Input.insertText", map[string]any{"text": req.Text}, nil); err != nil {
 			return api.BrowserResult{}, err
 		}
