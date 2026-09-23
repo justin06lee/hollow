@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
+	"runtime"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -206,6 +208,12 @@ func cmdLs(ctx context.Context, args []string) error {
 		if d.Error != "" {
 			state += " (" + d.Error + ")"
 		}
+		if d.Paused {
+			state += ", paused"
+		}
+		if d.Watchers > 0 {
+			state += fmt.Sprintf(", %d watching", d.Watchers)
+		}
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%dM\t%dx%d\t%s\t%s\n", d.ID, d.Name, d.OS, state, d.MemMB, d.Width, d.Height,
 			time.Since(d.Created).Round(time.Second), time.Since(d.LastUsed).Round(time.Second))
 	}
@@ -224,11 +232,18 @@ func cmdRm(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	// One missing desk does not keep the rest running.
+	failed := 0
 	for _, id := range fs.Args() {
 		if err := c.Delete(ctx, id); err != nil {
-			return err
+			fmt.Fprintf(os.Stderr, "hollow: %v\n", err)
+			failed++
+			continue
 		}
 		fmt.Fprintf(os.Stderr, "desk %s stopped\n", id)
+	}
+	if failed > 0 {
+		return exitError(1)
 	}
 	return nil
 }
@@ -723,4 +738,70 @@ func cmdSecret(ctx context.Context, args []string) error {
 			return []secrets.Host{{Name: name, Client: c}}, nil
 		},
 	}, rest)
+}
+
+func cmdView(ctx context.Context, args []string) error {
+	fs := newFlags("view", "view [ID] [--print]")
+	printOnly := fs.Bool("print", false, "print the link instead of opening it")
+	if err := parse(fs, args); err != nil {
+		return err
+	}
+	c, err := dial()
+	if err != nil {
+		return err
+	}
+	u, err := c.ViewURL(ctx, fs.Arg(0))
+	if err != nil {
+		return err
+	}
+	if *printOnly || !openBrowser(u) {
+		fmt.Println(u)
+		fmt.Fprintln(os.Stderr, "open it in a browser on a machine that reaches the host; it works once, within 15 minutes")
+	}
+	return nil
+}
+
+// openBrowser opens a URL in this machine's browser, when it has one.
+func openBrowser(u string) bool {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.Command("open", u)
+	case "windows":
+		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", u)
+	default:
+		if os.Getenv("DISPLAY") == "" && os.Getenv("WAYLAND_DISPLAY") == "" {
+			return false
+		}
+		cmd = exec.Command("xdg-open", u)
+	}
+	return cmd.Start() == nil
+}
+
+func cmdPause(ctx context.Context, args []string, paused bool) error {
+	name := "pause"
+	if !paused {
+		name = "resume"
+	}
+	fs := newFlags(name, name+" ID")
+	if err := parse(fs, args); err != nil {
+		return err
+	}
+	if err := need(fs, 1, "ID"); err != nil {
+		return err
+	}
+	c, err := dial()
+	if err != nil {
+		return err
+	}
+	d, err := c.Pause(ctx, fs.Arg(0), paused)
+	if err != nil {
+		return err
+	}
+	if d.Paused {
+		fmt.Printf("%s: paused; agents wait until you run hollow resume %s\n", d.Name, d.Name)
+	} else {
+		fmt.Printf("%s: agents have it back\n", d.Name)
+	}
+	return nil
 }

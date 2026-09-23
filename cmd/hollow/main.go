@@ -71,6 +71,8 @@ client:
   hollow rec      ID start|stop [FILE]    record the screen; stop writes an MP4
   hollow health   ID                      the desk's display and agent
   hollow logs     ID                      the desk's console
+  hollow view     [ID] [--print]          watch desks live in a browser, and take one over
+  hollow pause    ID                      take a desk from agents; resume gives it back
   hollow secret   set|ls|rm|import        the host's vault: secrets agents type as {{name}}
   hollow version
 
@@ -147,6 +149,12 @@ func main() {
 		err = cmdWindows(ctx, args)
 	case "clip", "clipboard":
 		err = cmdClip(ctx, args)
+	case "view", "watch":
+		err = cmdView(ctx, args)
+	case "pause":
+		err = cmdPause(ctx, args, true)
+	case "resume", "unpause":
+		err = cmdPause(ctx, args, false)
 	case "secret", "secrets", "vault":
 		err = cmdSecret(ctx, args)
 	case "version", "-v", "--version":

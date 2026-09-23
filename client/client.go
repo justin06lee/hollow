@@ -638,3 +638,31 @@ func (c *Client) SetSecret(ctx context.Context, name string, in api.SecretSet) (
 func (c *Client) DeleteSecret(ctx context.Context, name string) error {
 	return c.doJSON(ctx, http.MethodDelete, "/v1/secrets/"+url.PathEscape(name), nil, nil)
 }
+
+// ViewLink asks for a link to the live view: of one desk, or with desk
+// "", of every desk on the host. It opens once, and not for long.
+func (c *Client) ViewLink(ctx context.Context, desk string) (api.ViewLink, error) {
+	var out api.ViewLink
+	return out, c.doJSON(ctx, http.MethodPost, "/v1/view", api.ViewRequest{Desk: desk}, &out)
+}
+
+// ViewURL is ViewLink as a whole URL, at the address this client reaches
+// the host by, which is one the machine asking can open.
+func (c *Client) ViewURL(ctx context.Context, desk string) (string, error) {
+	link, err := c.ViewLink(ctx, desk)
+	if err != nil {
+		return "", err
+	}
+	base, err := c.Base(ctx)
+	if err != nil {
+		return "", err
+	}
+	return base + link.Path, nil
+}
+
+// Pause takes a desk from agents (true) or gives it back (false). Agents'
+// actions on a paused desk are refused with 423 until it is given back.
+func (c *Client) Pause(ctx context.Context, id string, paused bool) (api.Desk, error) {
+	var out api.Desk
+	return out, c.doJSON(ctx, http.MethodPost, deskPath(id)+"/pause", api.Pause{Paused: paused}, &out)
+}

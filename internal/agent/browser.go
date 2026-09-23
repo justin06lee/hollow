@@ -91,6 +91,9 @@ func (b *browser) ensure() error {
 		return errors.New("no Chromium on this desk")
 	}
 	profile := filepath.Join(b.s.home, ".config", "hollow-browser")
+	if err := quietProfile(profile); err != nil {
+		return fmt.Errorf("browser profile: %w", err)
+	}
 	cmd := exec.Command(bin,
 		fmt.Sprintf("--remote-debugging-port=%d", cdpPort),
 		"--user-data-dir="+profile,
@@ -117,6 +120,40 @@ func (b *browser) ensure() error {
 		}
 	}
 	return errors.New("chromium started but its debugging port never answered")
+}
+
+// quietProfile turns off the browser's own password manager and form
+// autofill before it starts. Secrets reach pages through the host's vault;
+// a browser that offered to keep a copy would leave the password on the
+// desk's disk, and fill it in later without the vault's guards.
+func quietProfile(profile string) error {
+	path := filepath.Join(profile, "Default", "Preferences")
+	prefs := map[string]any{}
+	if data, err := os.ReadFile(path); err == nil {
+		_ = json.Unmarshal(data, &prefs)
+	}
+	sub := func(k string) map[string]any {
+		m, ok := prefs[k].(map[string]any)
+		if !ok {
+			m = map[string]any{}
+			prefs[k] = m
+		}
+		return m
+	}
+	prefs["credentials_enable_service"] = false
+	prefs["credentials_enable_autosignin"] = false
+	sub("profile")["password_manager_enabled"] = false
+	autofill := sub("autofill")
+	autofill["profile_enabled"] = false
+	autofill["credit_card_enabled"] = false
+	data, err := json.Marshal(prefs)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0o600)
 }
 
 // page picks the tab to work in: the one on screen, so that a read and a

@@ -61,6 +61,8 @@ type Server struct {
 	urls    func() []string
 	agent   *http.Client
 	mux     *http.ServeMux
+	views   *views
+	viewMux *http.ServeMux
 }
 
 // NewServer wires the API to its parts. urls says where clients can reach
@@ -78,7 +80,9 @@ func NewServer(version, token string, b backend.Backend, images *image.Manager, 
 		// recording stop returns a whole file. The caller's context bounds it.
 		agent: &http.Client{},
 		mux:   http.NewServeMux(),
+		views: newViews(),
 	}
+	s.viewMux = s.viewRoutes()
 	m := s.mux
 	m.HandleFunc("GET /v1/hello", s.handleHello)
 	m.HandleFunc("GET /v1/status", s.handleStatus)
@@ -90,6 +94,8 @@ func NewServer(version, token string, b backend.Backend, images *image.Manager, 
 	m.HandleFunc("GET /v1/desks/{id}", s.handleDesk)
 	m.HandleFunc("DELETE /v1/desks/{id}", s.handleDelete)
 	m.HandleFunc("GET /v1/desks/{id}/logs", s.handleLogs)
+	m.HandleFunc("POST /v1/desks/{id}/pause", s.handlePause)
+	m.HandleFunc("POST /v1/view", s.handleViewLink)
 	m.HandleFunc("/v1/desks/{id}/{rest...}", s.handleAgent)
 	m.HandleFunc("GET /v1/agent/hollow-agent", s.handleAgentBinary)
 	m.HandleFunc("GET /v1/secrets", s.handleSecrets)
@@ -102,6 +108,10 @@ func NewServer(version, token string, b backend.Backend, images *image.Manager, 
 // download. Hello says only that a hollow is here; the agent is fetched by
 // guests, which have no token, before they know anything.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == "/view" || strings.HasPrefix(r.URL.Path, "/view/") {
+		s.serveView(w, r) // a browser, with a session cookie of its own
+		return
+	}
 	if r.URL.Path == "/v1/hello" || strings.HasPrefix(r.URL.Path, "/v1/agent/") {
 		s.mux.ServeHTTP(w, r)
 		return
@@ -226,8 +236,38 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 // On the way in, placeholders for secrets are filled in; on the way out,
 // secret values are replaced by their placeholders.
 func (s *Server) handleAgent(w http.ResponseWriter, r *http.Request) {
-	ref := r.PathValue("id")
-	rest := r.PathValue("rest")
+	ref, rest := r.PathValue("id"), r.PathValue("rest")
+	if s.desks.Paused(ref) && pausedBlocks(r.Method, rest) {
+		writeError(w, http.StatusLocked, errPaused)
+		return
+	}
+	if rest == "stream" {
+		s.proxyStream(w, r, ref)
+		return
+	}
+	s.proxy(w, r, ref, rest)
+}
+
+var errPaused = errors.New("a person has taken this desk over in the live view, and agents are paused on it until they hand it back. " +
+	"Screenshots and reads still work: wait, look again, and carry on once it is handed back — or ask the user whether they are done")
+
+// pausedBlocks says which requests change a desk, and so wait while a
+// person has it. Looking — screenshots, reads, lists — never waits.
+func pausedBlocks(method, rest string) bool {
+	switch rest {
+	case "input", "exec", "browser/open", "browser/click", "browser/type", "browser/eval", "stream":
+		return true
+	case "clipboard", "files":
+		return method == http.MethodPut
+	case "windows":
+		return method == http.MethodPost
+	}
+	return false
+}
+
+// proxy forwards one request to a desk's agent: rest is the agent's route,
+// and the query goes along as it is.
+func (s *Server) proxy(w http.ResponseWriter, r *http.Request, ref, rest string) {
 	base, key, err := s.desks.Agent(ref)
 	if err != nil {
 		writeError(w, http.StatusConflict, err)

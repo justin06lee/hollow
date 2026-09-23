@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>desk · hollow</title>
+<link rel="stylesheet" href="/view/static/view.css">
+<script src="/view/static/desk.js" defer></script>
+</head>
+<body class="desk-page">
+<header class="bar">
+  <a class="back" href="/view/" title="Every desk">&larr;</a>
+  <div class="title"><b id="name">desk</b><span class="meta" id="meta"></span></div>
+  <div class="spacer"></div>
+  <span class="pill wait" id="conn"><i></i><span>connecting</span></span>
+  <select id="quality" title="Picture quality: sharper costs bandwidth">
+    <option value="sharp">Sharp</option>
+    <option value="balanced" selected>Balanced</option>
+    <option value="light">Light</option>
+  </select>
+  <button id="clipBtn" title="The desk's clipboard, and text to type into it">Clipboard</button>
+  <button id="fullBtn" title="Full screen">Full screen</button>
+  <button id="pauseBtn" class="primary" title="Pause the agent and use the desk yourself">Take over</button>
+</header>
+<main class="stage" id="stage">
+  <canvas id="screen" tabindex="0" width="1280" height="800" aria-label="The desk's screen"></canvas>
+  <div class="overlay" id="overlay">Connecting&hellip;</div>
+</main>
+<footer class="hint" id="hint">
+  <span class="idle-hint">Click the screen to take over and type on it. <kbd>&#8984;</kbd> acts as <kbd>Ctrl</kbd>; pasting types your clipboard into the desk.</span>
+  <span class="held-hint"><b>You have this desk.</b> The agent is paused until you hand it back, or a minute after you close this page.</span>
+</footer>
+<div class="pop" id="clipPop" hidden>
+  <div class="pop-head">The desk's clipboard <button id="clipClose" title="Close">&times;</button></div>
+  <textarea id="clipText" readonly placeholder="Empty"></textarea>
+  <div class="pop-row"><button id="clipRefresh">Refresh</button><button id="clipCopy" class="primary">Copy here</button></div>
+  <hr>
+  <div class="pop-head">Type into the desk</div>
+  <textarea id="sendText" placeholder="Typed wherever the desk's text cursor is"></textarea>
+  <div class="pop-row"><button id="sendBtn" class="primary">Type it</button></div>
+</div>
+<div class="toast" id="toast" hidden></div>
+</body>
+</html>

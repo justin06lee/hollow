@@ -13,6 +13,7 @@ import (
 	"github.com/jezek/xgb"
 	"github.com/jezek/xgb/xfixes"
 	"github.com/jezek/xgb/xproto"
+	"github.com/jezek/xgb/xtest"
 	"github.com/justin06lee/hollow/api"
 )
 
@@ -33,6 +34,7 @@ type display struct {
 	conn   *xgb.Conn
 	screen *xproto.ScreenInfo
 	xfixes bool
+	xtest  bool
 	atoms  map[string]xproto.Atom
 }
 
@@ -53,6 +55,7 @@ func (d *display) connect() error {
 			d.xfixes = true
 		}
 	}
+	d.xtest = xtest.Init(c) == nil
 	return nil
 }
 
@@ -333,4 +336,40 @@ func (d *display) WindowAction(id, action string) error {
 	}
 	mask := uint32(xproto.EventMaskSubstructureRedirect | xproto.EventMaskSubstructureNotify)
 	return xproto.SendEventChecked(d.conn, false, d.screen.Root, mask, string(ev.Bytes())).Check()
+}
+
+// Pointer input for the live view goes through XTEST directly: a person
+// dragging a window sends a move every frame, and a process per move would
+// lag behind the hand. The keyboard still goes through xdotool, for the
+// reasons in input.go.
+
+// FakeMotion moves the pointer to x, y.
+func (d *display) FakeMotion(x, y int) error {
+	return d.fake(xproto.MotionNotify, 0, x, y)
+}
+
+// FakeButton presses or releases a pointer button: 1 left, 2 middle,
+// 3 right, 4 and 5 the wheel up and down, 6 and 7 left and right.
+func (d *display) FakeButton(button int, press bool) error {
+	t := byte(xproto.ButtonRelease)
+	if press {
+		t = xproto.ButtonPress
+	}
+	return d.fake(t, byte(button), 0, 0)
+}
+
+func (d *display) fake(t, detail byte, x, y int) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if err := d.connect(); err != nil {
+		return err
+	}
+	if !d.xtest {
+		return errors.New("the display has no XTEST extension")
+	}
+	if err := xtest.FakeInputChecked(d.conn, t, detail, 0, d.screen.Root, int16(x), int16(y), 0).Check(); err != nil {
+		d.drop()
+		return err
+	}
+	return nil
 }

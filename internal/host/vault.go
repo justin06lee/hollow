@@ -386,7 +386,7 @@ func (v *Vault) Fill(text string, mode int) (string, []api.Guard, error) {
 		}
 		if len(s.Sites) > 0 {
 			if mode == fillExec {
-				firstErr = fmt.Errorf("{{%s}} is only for %s, and a command is not a page on it — to let it into commands, store it for anywhere (bangboo secret set %s --anywhere)",
+				firstErr = fmt.Errorf("{{%s}} is only for %s, and a command is not a page on it — to let it into commands, store it for anywhere (bangboo secret set %s --merge --anywhere)",
 					name, strings.Join(s.Sites, ", "), name)
 				return m
 			}
