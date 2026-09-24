@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="assets/hollow.png" alt="hollow" width="256" />
+<img src="assets/hollow.webp" alt="hollow" width="640" />
 
 # hollow
 
