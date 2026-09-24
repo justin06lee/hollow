@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="assets/hollow.svg" alt="hollow" width="330" />
+<img src="assets/hollow.png" alt="hollow" width="256" />
 
 # hollow
 
